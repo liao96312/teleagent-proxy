@@ -1,5 +1,6 @@
 # 敏感 / 本机专属，切勿提交
 token.key
+session.key
 *.key
 *.log
 *.tmp

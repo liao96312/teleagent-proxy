@@ -12,7 +12,8 @@
 | 需要 App 开着 | ❌ 不需要（token 有效期内可独立跑） | ✅ 必须开着 |
 | 需要读 App 内存 | ❌ | ✅（取本地会话密钥） |
 | 被封风险 | **较高** | **低**（但仍非零） |
-| 实现状态 | **已实现可用**（本仓库 `scripts/teleagent-shim.js`） | **已逆向清楚，本文档给出完整实现步骤**（按需自行实现） |
+| **工具调用** | ✅ **支持**（网关原生 OpenAI，可传自定义 tools） | ❌ **不支持自定义工具**（内核用它自带的工具集） |
+| 实现状态 | **已实现**（`scripts/teleagent-shim.js`） | **已实现**（`scripts/teleagent-local-shim.js`） |
 
 > ⚠️ **合规与风险**：把 App 内额度搬到 App 外使用，违反服务商条款。**已有账号因本方法被封（`40109 current user is banned`）的真实案例**，详见 [`docs/ban-risk.md`](docs/ban-risk.md)。请仅在你自己的机器、自己的账号上研究，**风险自担**。想零风险请直接用官方 App。
 
@@ -147,7 +148,26 @@ User-Agent: super-agent/1.0
 
 ## 3. 方案 B：走 App 本地 server
 
-> **本方案文档化但未实现**（按要求不改动现有 shim）。下面是完整的落地方案。
+> ✅ **已实现可用**：`scripts/teleagent-local-shim.js`。
+> ⚠️ **重要限制：不支持自定义工具调用**（内核用它自己固定的工具集，会忽略请求里的 `tools`）。
+> 需要工具调用（如 pi 做编码）请用[方案 A](#2-方案-a直连云网关)，或见 [§3.6 工具限制](#36-工具调用限制重要)。
+
+### 3.0 快速使用
+
+```bash
+# 一次性 / 每次开机：从 TeleAgent 进程取本地会话密钥
+teleagent\runtimes\python\python.exe scripts\get-session-key.py
+
+# 启动方案 B shim（可双击）
+scripts\start-local-shim.cmd
+
+# 自检
+curl http://127.0.0.1:8788/v1/models
+```
+
+然后客户端照常填 `http://127.0.0.1:8788/v1`（与方案 A 同一端口，**pi 配置无需改动**）。
+
+前置：**TeleAgent 必须正在运行并已登录**。
 
 ### 3.1 原理
 TeleAgent 进程内跑着一个**本地 HTTP server**（Go 写的 `hertz` 框架），监听 `127.0.0.1:4397`（另有 `:19876`）。它是 App 前端（Electron 渲染进程）与内核通信的桥：
@@ -174,39 +194,63 @@ TeleAgent 进程内跑着一个**本地 HTTP server**（Go 写的 `hertz` 框架
    ```
    用它可验证你拿到的 sessionKey 是否正确。
 
-### 3.3 实现步骤
-1. **确认本地 server 在跑**
-   ```powershell
-   Get-NetTCPConnection -State Listen -LocalPort 4397
-   # 应看到 OwningProcess = TeleAgent.exe 的 PID
-   ```
-   （未鉴权访问会返回 `401 Unauthorized`，`Server: hertz`，属正常。）
-2. **取出 `sessionKey`**（按 3.2 的 (a)/(b)）。
-3. **写一个新的本地 shim**（例如 `teleagent-local-shim.js`），把 OpenAI 请求翻译成 App 本地 server 的接口：
-   - 监听 `127.0.0.1:8788/v1/*`（对外仍是 OpenAI 协议）；
-   - 对每个出站请求：
-     ```js
-     const ts = Date.now();                       // 毫秒!
-     const rnd = crypto.randomBytes(12).toString('hex');
-     const msg = ['local-v1', method, pathWithQuery, ts, rnd].join('\n');
-     const sig = crypto.createHmac('sha256', sessionKey).update(msg).digest('base64url');
-     headers['X-SA-Signature'] = sig;
-     headers['X-SA-Timestamp'] = String(ts);
-     headers['X-SA-Nonce'] = rnd;
-     // 再按 App 前端的真实请求头补齐（见 docs/signature-algorithms.md）
-     ```
-   - 转发到 `http://127.0.0.1:4397<真实路径>`。
-4. **找到 App 聊天用的真实本地路径**
-   - 参考内核日志：`%USERPROFILE%\.local\share\TeleAgent\users\<account>\log\super-agent-server-*.log`（里面有 `receive request method=... path=...`）。
-   - 或用抓包（mitmproxy / Fiddler 看 `127.0.0.1:4397` 流量）确定对话/流式接口路径与 body 结构。
-5. **SSE 透传**：本地 server 是流式的，shim 原样把 SSE 转发回客户端即可。
+### 3.3 本仓库的实现（`scripts/teleagent-local-shim.js`）
 
-### 3.4 优缺点
+它做的事：
+1. 从同目录 `session.key` 读 `sessionKey`（没有就读 `TA_SESSION_KEY`；失效时自动重跑 `get-session-key.py`）。
+2. 把 OpenAI 请求翻译成内核接口：
+   ```
+   POST /v1/chat/completions
+     └─→ POST http://127.0.0.1:4397/session              # 每个会话建一个内核会话
+         POST http://127.0.0.1:4397/session/:id/message  # 发消息，拿 parts
+   ```
+   出站请求带本地签名：
+   ```js
+   const ts  = Date.now();                                 // 毫秒!
+   const rnd = crypto.randomBytes(12).toString('hex');
+   const msg = ['local-v1', method, '/session', ts, rnd].join('\n');
+   const sig = crypto.createHmac('sha256', sessionKey).update(msg).digest('base64url');
+   // X-SA-Sign-Version / X-SA-Timestamp / X-SA-Nonce / X-SA-Signature
+   ```
+3. **会话映射**：OpenAI 请求没有会话 ID。shim 用「历史消息前缀的 SHA1」把多轮对话绑到同一个内核会话：
+   每轮结束后记录 `hash(本轮全部消息) -> 内核会话ID`，下一轮（历史 = 上轮全量）就能命中同一个会话。
+   （也可以把多个内核会话完全独立，代价是丢失上文。）
+4. **响应转换**：内核返回的 `data.parts` 里 `type=="text"` 的部分拼成 `choices[0].message.content`；
+   `stream:true` 时把这段文本按块模拟成 SSE（内核接口本身是一次性返回）。
+5. **空响应兜底**：刚建会话时偶发空回复，会自动重发一次。
+
+### 3.4 内核接口速查（OpenCode 风格）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/session` | 列出会话 |
+| POST | `/session` | 建会话，body `{"title":"..."}`，返回 `{id}` |
+| POST | `/session/:id/message` | 发消息。body `{model:{providerID,modelID}, parts:[{type:"text",text:"..."}], system?}`，返回 `{data:{info,parts}}` |
+| GET | `/session/:id/message` | 取该会话消息列表 |
+| GET | `/provider` | 列 provider（可见 `NewApi` → 网关 baseURL + apiKey） |
+| GET | `/config` | 内核配置（`agent` / `mcp` / `provider`） |
+| GET | `/openapi` | 路由摘要 |
+| GET | `/global/event` | SSE 事件流 |
+
+模型选择：`{"providerID":"NewApi","modelID":"chat-pro"}`。
+
+### 3.5 优缺点
 - ✅ 出站流量与 App 无异 → **被封风险最低**。
 - ✅ 不用自己维护云签名算法（App 升级也不影响）。
-- ❌ App 必须开着；`sessionKey` 每次启动变，需要自动重新获取。
-- ❌ 本地接口不是标准 OpenAI 格式，需要一层协议翻译（工作量主要在"找真实路径 + 对齐 body"）。
+- ✅ 已实现，pi 配置与方案 A 完全相同（同一端口）。
+- ❌ **不支持自定义工具调用**（见下）。
+- ❌ App 必须开着；`sessionKey` 每次启动会变，需重新获取（脚本已自动化）。
 - ❌ 账号已被封时无用（App 自己也 401）。
+
+### 3.6 工具调用限制（重要）
+
+内核跑的是 **它自己的 agent 循环**，工具集是固定的（bash / 读写文件 / online_search / MCP 等，由内核配置决定）。
+实测：在 `/session/:id/message` 里传 OpenAI 风格的 `tools` 定义会被忽略，模型会直接回答“工具列表里没有 xxx”。
+
+所以：
+- 只想**对话** → 方案 B 完全够用，且最安全。
+- 需要**自定义工具调用**（pi 做编码、跑代理循环）→ 只能用方案 A（直连网关，网关是真正的 OpenAI 端点、原生支持 tools）。
+- 桥接思路：内核支持在 `/config` 里配 **MCP server**，理论上可把外部工具注册给内核（但那样跑的是内核的 agent 循环，不是调用方的）。
 
 ---
 
@@ -287,7 +331,11 @@ setx TA_API_KEY "my-secret-123"     # 永久；重启 shim 生效
 
 重启电脑后：
 1. 确认 **TeleAgent 已打开并登录**（方案 B 必须；方案 A 只要 token 没过期可不开）。
-2. 双击 **`scripts\start-shim.cmd`**。
+2. 双击启动脚本：
+   - **方案 B（推荐，最安全）**：`scripts\start-local-shim.cmd`（会先自动取本地会话密钥）
+   - 方案 A（支持工具调用）：`scripts\start-shim.cmd`
+
+两个方案都监听**同一个端口 8788**，所以**客户端/pi 配置无需改动**，换着跑即可。
 
 **不需要再跑 setup**（`token.key` 一直在，除非换机器/重装系统）。
 
@@ -350,9 +398,15 @@ netstat -ano | findstr :8788                                   # 在跑吗
 | [`docs/signature-algorithms.md`](docs/signature-algorithms.md) | **两套签名算法**（云网关两轮 HMAC + App 本地 `X-SA-Signature`）逐字段说明 |
 | [`docs/ban-risk.md`](docs/ban-risk.md) | 封号机理、触发因素、规避建议（含真实案例时间线） |
 | [`docs/recon-notes.md`](docs/recon-notes.md) | 逆向过程笔记：二进制地址、内存扫描方法、错误码表 |
-| `scripts/teleagent-shim.js` | 方案 A 实现（自动探测 account/device/install） |
+| `scripts/teleagent-shim.js` | **方案 A** 实现（直连网关，自动探测 account/device/install，支持工具调用） |
 | `scripts/setup.py` / `setup.cmd` | 一次性：解出 AES key |
-| `scripts/start-shim.cmd` | 启动 shim |
+| `scripts/start-shim.cmd` | 启动方案 A |
+| `scripts/teleagent-local-shim.js` | **方案 B** 实现（走 App 本地 server） |
+| `scripts/get-session-key.py` | 从 TeleAgent 进程内存取本地会话密钥 → `session.key` |
+| `scripts/start-local-shim.cmd` | 启动方案 B（含取密钥） |
+| `docs/signature-algorithms.md` | 两套签名算法 |
+| `docs/ban-risk.md` | 封号机理与真实案例 |
+| `docs/recon-notes.md` | 逆向过程与工具方法 |
 
 ---
 
