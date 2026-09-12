@@ -355,6 +355,41 @@ TeleAgent 进程内跑着一个**本地 HTTP server**（Go 写的 `hertz` 框架
 
 使用：pi 里输入 `/model` → 选 `teleagent` → 选 `chat-pro`（改完即热重载，无需重启）。
 
+### 4.4 在 pi 里用生图 / 视觉
+
+先确认：模型配置里的 `input` 要包含 `"image"`（否则 pi 不会让你发图）：
+```json
+{ "id": "chat-pro", "input": ["text", "image"], ... }
+```
+
+#### 生图（走 bash 工具 + 一键脚本）
+pi 没有内置生图工具，所以让它调本仓库提供的脚本：
+
+1. 确认 shim 在跑（`netstat -ano | findstr :8788`）
+2. 在 pi 里直接说：`生成一张「一只熊猫在敲代码，扁平插画」，存到 D:\panda.jpg`
+3. pi 会执行：
+   ```
+   python <仓库>\scripts\ta-image.py "一只熊猫在敲代码，扁平插画" D:\panda.jpg
+   ```
+4. 约束：尺寸 **≥1920×1920**（默认 `2048x2048`），小图会被网关拒。
+
+#### 视觉
+1. 在 pi 里附上图片（三种方式任选）：
+   - `Alt+V` 从剪贴板粘贴（Windows；WSL 同）
+   - 把图片**拖进终端**
+   - 提示里写 `@D:\shot.png`
+2. 正常提问。pi 会以 OpenAI 多模态格式发出去，shim **自动**切 `model=vision-standard` + `X-Teleai-Run-Unit-Type: tool_call`。
+3. 命令行/脚本场景可用：
+   ```
+   python <仓库>\scripts\ta-vision.py D:\shot.png "这个报错是什么意思？"
+   ```
+
+> 图片最小边 14 像素。两个脚本都用 Python 标准库，无需装依赖。
+
+**⚠️ 重要区别**：这是**反代出来的裸模型能力**，不是复用内核的 `ImageGen` / `image_understanding` 工具。
+所以内核工具帮你做的那些事（落盘命名、图生图编排、工具安全审查、多图重试）**都不包含**，
+需要由 pi（或你）自己做。详见 [`docs/image-and-vision.md`](docs/image-and-vision.md)。
+
 ---
 
 ## 5. 接入其它工具
@@ -498,7 +533,9 @@ Go 版启动日志长这样：
 | 文件 | 内容 |
 |---|---|
 | [`kernel-internals.md`](docs/kernel-internals.md) | 内核/本地服务内部结构：进程与端️口、三层鉴权、注入的 env、OpenCode API、**自带工具清单** |
-| [`image-and-vision.md`](docs/image-and-vision.md) | **生图 / 图生图 / 视觉**：真机抓到的端点与 body、`image-generation-pro` 与 `vision-standard`、尺寸限制 |
+| `scripts/ta-image.py` | 一键生图（提示词 → 文件），供 pi 的 bash 工具调用 |
+| `scripts/ta-vision.py` | 一键看图（图片 + 问题 → 回答） |
+| [`image-and-vision.md`](docs/image-and-vision.md) | 生图/视觉：端点、模型名、尺寸限制、**与内核工具的区别** |
 | [`wire-fidelity.md`](docs/wire-fidelity.md) | 真机抓取的内核 wire 请求、头差异清单、**Go 版如何对齐传输层**、仍无法伪装的部分 |
 | [`signature-algorithms.md`](docs/signature-algorithms.md) | **两套签名算法**（云网关两轮 HMAC + 内核本地 `X-SA-*`）逐字段说明 |
 | [`ban-risk.md`](docs/ban-risk.md) | 封号机理、触发因素、规避建议（含真实案例时间线） |
