@@ -117,7 +117,26 @@ AUTH_STATE = AES-256-GCM( SHA256(sessionKey), { token, deviceId, installId } )
 
 ---
 
-## 3. 两种方案怎么选
+## 3. 第三套签名：AKSKSigner（旁路，反代不需要）
+
+还有一个独立的签名器，**与模型网关无关**，只用于工具安全审查接口
+`/security/instruction/review`：
+
+```
+X-Ak: <AK>
+X-Signature: <64hex 单轮 HMAC>      # 不是两轮
+X-Nonce: <...>
+X-Timestamp: <...>
+```
+
+密钥来自 `SUPER_AGENT_TOOLS_SECURITY_AK` / `SUPER_AGENT_TOOLS_SECURITY_SK`（见 kernel-internals.md 的 env 清单）。
+反代模型**用不到它**，列在这里只是避免以后误把它当成网关签名。
+
+二进制地址：`AKSKSigner.Sign @ 0x140d70940`。
+
+---
+
+## 4. 两种方案怎么选
 
 - **只要够用、不常跑、量小** → 方案 A（直连），实现简单，本仓库已可用。
 - **在意账号安全、要长期跑** → 方案 B（走本地 server），出站流量与 App 完全一致。

@@ -271,8 +271,19 @@ TeleAgent 进程内跑着一个**本地 HTTP server**（Go 写的 `hertz` 框架
 
 ## 4. 接入 pi
 
-pi 的自定义 provider 配在 `%USERPROFILE%\.pi\agent\models.json`，key 在 `%USERPROFILE%\.pi\agent\auth.json`。
+### 4.0 模型与真实参数
 
+内核里写死的三个模型（来自 `main-runtime.js`）：
+
+| 模型 | 名称 | 上下文 | 最大输出 | 说明 |
+|---|---|---|---|---|
+| `chat-pro` | 旗舰 | 400,000 | 65,536 | 默认/最强 |
+| `chat-flash` | 极速 | 400,000 | 65,536 | 快，长上下文 |
+| `chat-lite` | 轻量 | 100,000 | 16,384 | 轻量任务 |
+
+三者都开启 `tool_stream`。另外还存在 `chat-nano`（未在内核默认列表启用）。
+
+### 4.1 配 provider
 **`models.json`**（在已有 `providers` 里**追加** `teleagent`，勿删原有）：
 ```json
 {
@@ -283,12 +294,12 @@ pi 的自定义 provider 配在 `%USERPROFILE%\.pi\agent\models.json`，key 在 
       "apiKey": "teleagent",
       "compat": { "supportsStore": false, "supportsDeveloperRole": false, "maxTokensField": "max_tokens" },
       "models": [
-        { "id": "chat-pro",   "name": "TeleAgent chat-pro",   "reasoning": true, "input": ["text"],
-          "contextWindow": 200000, "maxTokens": 65536, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
-        { "id": "chat-lite",  "name": "TeleAgent chat-lite",  "input": ["text"],
-          "contextWindow": 200000, "maxTokens": 65536, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
-        { "id": "chat-flash", "name": "TeleAgent chat-flash", "input": ["text"],
-          "contextWindow": 200000, "maxTokens": 65536, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} }
+        { "id": "chat-pro",   "name": "TeleAgent 旗舰", "reasoning": true, "input": ["text"],
+          "contextWindow": 400000, "maxTokens": 65536, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
+        { "id": "chat-lite",  "name": "TeleAgent 轻量", "input": ["text"],
+          "contextWindow": 100000, "maxTokens": 16384, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} },
+        { "id": "chat-flash", "name": "TeleAgent 极速", "input": ["text"],
+          "contextWindow": 400000, "maxTokens": 65536, "cost": {"input":0,"output":0,"cacheRead":0,"cacheWrite":0} }
       ]
     }
   }
