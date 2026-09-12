@@ -40,6 +40,13 @@ function findAccountDir() {
   try {
     const users = path.join(CONFIG.dataDir, 'users');
     const ds = fs.readdirSync(users).filter(d => d.startsWith('v1_public_'));
+    // 优先选「有 token.json 且最新」的账号（切号后旧目录可能残留但 token 已删）
+    const withToken = ds.map(d => {
+      let mt = -1;
+      try { mt = fs.statSync(path.join(users, d, 'app-auth', 'token.json')).mtimeMs; } catch (_) {}
+      return { d, mt };
+    }).filter(x => x.mt >= 0).sort((a, b) => b.mt - a.mt);
+    if (withToken.length) return withToken[0].d;
     if (ds.length) return ds[0];
   } catch (_) {}
   return null;
@@ -114,31 +121,59 @@ function computeSignature(token, method, signPath, tsSec, nonce, bodyBuf) {
   return crypto.createHmac('sha256', sig1).update(m2, 'utf8').digest('hex');
 }
 
+// ---------- ID 生成（对齐内核形状：<前缀>_ + 12位hex + 14位base62） ----------
+const B62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+function b62(n) { let s = ''; for (let i = 0; i < n; i++) s += B62[crypto.randomInt(62)]; return s; }
+// 内核的 hex 段随**时间递减**（近似 bit-reversed 时间戳），这里用 ~Date.now() 模仿
+function kernId(prefix) {
+  const inv = (~Date.now()) >>> 0;
+  const hex = (inv.toString(16) + crypto.randomBytes(3).toString('hex')).slice(0, 12).padEnd(12, '0');
+  return prefix + '_' + hex + b62(14);
+}
+// UUIDv7（内核 X-Request-Id 是 v7，非 v4）
+function uuidv7() {
+  const b = crypto.randomBytes(16);
+  const ms = Date.now();
+  b[0] = (ms / 2 ** 40) & 0xff; b[1] = (ms / 2 ** 32) & 0xff;
+  b[2] = (ms / 2 ** 24) & 0xff; b[3] = (ms / 2 ** 16) & 0xff;
+  b[4] = (ms / 2 ** 8) & 0xff;  b[5] = ms & 0xff;
+  b[6] = (b[6] & 0x0f) | 0x70;  // version 7
+  b[8] = (b[8] & 0x3f) | 0x80;  // variant
+  const h = b.toString('hex');
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+// 与内核逐字段对齐的请求头（顺序也按内核/Go 的写出顺序）
 function buildHeaders(token, method, bodyBuf) {
   const ts = Math.floor(Date.now() / 1000);
   const nonce = crypto.randomUUID();
   const sig = computeSignature(token, method, CONFIG.signPath, ts, nonce, bodyBuf);
+  const msgId = kernId('msg');
+  const sesId = kernId('ses');
   return {
-    'Authorization': 'Bearer ' + CONFIG.sk,
-    'Content-Type': 'application/json',
     'Accept': 'text/event-stream',
+    'Accept-Encoding': 'gzip',                       // 内核只发 gzip
+    'Authorization': 'Bearer ' + CONFIG.sk,
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Content-Type': 'application/json',
     'User-Agent': 'super-agent/1.0',
-    'X-Route-Target': 'ops-gateway',
-    'X-Token': token,
     'X-App-Version': CONFIG.appVersion,
-    'X-Device-Os': 'Windows',
-    'X-Device-Os-Version': '10.0.26100',
-    'X-Message-Id': 'msg_' + crypto.randomBytes(12).toString('hex'),
-    'X-Request-Id': crypto.randomUUID(),
-    'X-Session-Id': 'ses_' + crypto.randomBytes(12).toString('hex'),
-    'X-Teleai-Client-Type': 'desktop',
-    'X-Teleai-Run-Unit-Type': 'agent_loop',
+    'X-Message-Id': msgId,
+    'X-Request-Id': uuidv7(),                        // UUIDv7
+    'X-Route-Target': 'ops-gateway',
+    'X-Session-Id': sesId,
     'X-Superagent-Device-Id': CONFIG.deviceId,
     'X-Superagent-Install-Id': CONFIG.installId,
     'X-Superagent-Nonce': nonce,
     'X-Superagent-Sign-Version': 'v1',
     'X-Superagent-Signature': sig,
     'X-Superagent-Timestamp': String(ts),
+    'X-Teleai-Client-Type': 'desktop',
+    'X-Teleai-Root-Session-Id': sesId,
+    'X-Teleai-Run-Unit-Type': 'agent_loop',
+    'X-Teleai-Upstream-Request-Id': crypto.randomUUID(),
+    'X-Token': token,
   };
 }
 

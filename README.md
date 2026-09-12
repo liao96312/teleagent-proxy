@@ -148,6 +148,20 @@ User-Agent: super-agent/1.0
 - **不要**用错误签名反复试探网关 —— 会触发风控（`40105 疑似攻击` → `40109 封号`）。这是本仓库作者踩过的坑。
 - `token.json` 有效期约 3~4 天，shim 会在 401/403 时自动重新解密；token 彻底过期需重开 App 登录。
 
+### 2.6 ★ 想要传输层也像 App？用 Go 版
+
+Node 版的 HTTP 头可以对齐，但 **TLS ClientHello 指纹**（Go vs Node/OpenSSL）无法伪装。
+因此提供了一个 **用内核同版本 Go（1.26.5）编译**的实现：
+
+```
+scripts\go\main.go          # 源码
+scripts\go\build.cmd        # 编译 -> scripts\teleagent-shim.exe
+scripts\start-shim-go.cmd   # 启动
+```
+
+实测从自己的进程内存 dump 出来的 wire，与内核请求**逐字段逐顺序一致**。
+完整对比与原理见 [`docs/wire-fidelity.md`](docs/wire-fidelity.md)。
+
 ---
 
 ## 3. 方案 B：走 App 本地 server
@@ -424,6 +438,7 @@ netstat -ano | findstr :8788                                   # 在跑吗
 | 文件 | 内容 |
 |---|---|
 | [`kernel-internals.md`](docs/kernel-internals.md) | 内核/本地服务内部结构：进程与端️口、三层鉴权、注入的 env、OpenCode API、**自带工具与生图** |
+| [`wire-fidelity.md`](docs/wire-fidelity.md) | 真机抓取的内核 wire 请求、头差异清单、**Go 版如何对齐传输层**、仍无法伪装的部分 |
 | [`signature-algorithms.md`](docs/signature-algorithms.md) | **两套签名算法**（云网关两轮 HMAC + 内核本地 `X-SA-*`）逐字段说明 |
 | [`ban-risk.md`](docs/ban-risk.md) | 封号机理、触发因素、规避建议（含真实案例时间线） |
 | [`recon-notes.md`](docs/recon-notes.md) | 逆向过程：二进制地址、内存扫描方法、错误码表 |
@@ -432,9 +447,14 @@ netstat -ano | findstr :8788                                   # 在跑吗
 
 | 文件 | 内容 |
 |---|---|
-| `scripts/teleagent-shim.js` | 实现（自动探测 account / device / install；SSE 透传；工具调用实测可用） |
+| `scripts/teleagent-shim.js` | Node 版实现（头已对齐内核；自动探测 account / device / install） |
+| `scripts/go/main.go` | **Go 版实现**（传输层指纹与内核一致；推荐） |
+| `scripts/go/build.cmd` / `scripts/start-shim-go.cmd` | 编译 / 启动 Go 版 |
+| `scripts/teleagent-shim.exe` | Go 版产物（不入库，自行编译） |
 | `scripts/setup.py` / `setup.cmd` | 一次性：解出 safeStorage AES key → `token.key` |
-| `scripts/start-shim.cmd` | 启动方案 A |
+| `scripts/start-shim.cmd` | 启动 Node 版 |
+| `scripts/scan-gateway-req.py` | 从内核/自身进程内存 dump 真实 wire 请求（做对比用） |
+| `scripts/scan-req-body.py` | dump 请求 body 结构与是否带 tools |
 
 **方案 B（走 App 本地 server，可用内核自带工具）**
 

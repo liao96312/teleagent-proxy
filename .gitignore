@@ -2,6 +2,7 @@
 token.key
 session.key
 *.key
+*.exe
 *.log
 *.tmp
 .DS_Store
