@@ -107,7 +107,26 @@ scripts\go\build.cmd          # 输出 scripts\teleagent-shim.exe
 scripts\start-shim-go.cmd     # 启动
 ```
 
-## 4. 仍然无法伪装的部分
+## 4. 会话 ID（X-Session-Id）已改为真实内核会话
+
+问题：内核每个请求的 `X-Session-Id` 都绑一个**真实创建过的**会话（`POST /session` 建的）；
+早期 shim 每次请求都随机生成一个 `ses_...`，服务端没有对应会话，且同一对话的 ID 不连贯。
+
+修法（仅 Go 版）：
+1. 启动时读 `session.key`（`get-session-key.py` 生成）；
+2. 用本地签名 `X-SA-*` 调本机内核 `POST http://127.0.0.1:4397/session` 建**真会话**；
+3. 按「对话指纹」（第一条 user 消息的 SHA1）缓存 `会话ID`，后续轮次复用；
+4. `X-Session-Id` 与 `X-Teleai-Root-Session-Id` 都用它；
+5. 拿不到密钥/内核不可达时，退化为形状对齐的合成 ID（仍可用）。
+
+实测：内核 `GET /session` 能看到 shim 建的会话（title=`pi`），且同一对话多轮只建一次。
+
+```
+[go-shim] 内核会话支持: 开（session.key 已加载，X-Session-Id 为真实会话）
+[go-shim] new session for conversation ab22e866 -> ses_f6c9a2eb9ffelERY546tiRz5r2 (real=true)
+```
+
+## 5. 仍然无法伪装的部分
 
 | 维度 | 说明 |
 |---|---|
@@ -116,7 +135,7 @@ scripts\start-shim-go.cmd     # 启动
 | **出口 IP / 设备** | 同机同 IP 天然一致；deviceId/installId 也要保持一致。 |
 | 频率 | 人类节奏；不要并发刷。 |
 
-## 5. 结论
+## 6. 结论
 
 - **协议层（头 + 签名 + 传输）**：Go 版已做到与内核一致。
 - **行为层**：单靠 shim 做不到，必须让 App 一起跑。

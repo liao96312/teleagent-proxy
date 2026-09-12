@@ -14,10 +14,12 @@
 package main
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -32,6 +34,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -48,12 +51,17 @@ var (
 	dataDir    = envOr("TA_DATA_DIR", filepath.Join(home(), ".local", "share", "TeleAgent"))
 	appVersion = envOr("TA_APP_VERSION", "2.5.0")
 	sk         = envOr("TA_SK", defaultSK)
+	kernelURL  = envOr("TA_KERNEL_URL", "http://127.0.0.1:4397")
 	account    string
 	deviceID   string
 	installID  string
 	aesKey     []byte
 	cachedTok  string
 	cachedAt   time.Time
+
+	sessionKey  string   // 内核本地签名密钥（用于创建真会话）
+	sessMu      sync.Mutex
+	sessByConv  = map[string]string{} // 对话指纹 -> 内核会话ID
 )
 
 func home() string {
@@ -173,6 +181,115 @@ func loadAESKey() error {
 	return fmt.Errorf("缺少 AES key：设置 TA_AES_KEY，或把 64 位 hex 写入 token.key")
 }
 func mustCwd() string { d, _ := os.Getwd(); return d }
+
+// ---------- 内核本地会话（让 X-Session-Id 是真实存在的会话） ----------
+func exeDir() string { e, _ := os.Executable(); return filepath.Dir(e) }
+
+func loadSessionKey() string {
+	if v := os.Getenv("TA_SESSION_KEY"); v != "" {
+		return strings.TrimSpace(v)
+	}
+	for _, p := range []string{
+		filepath.Join(exeDir(), "session.key"),
+		filepath.Join(mustCwd(), "session.key"),
+		filepath.Join(dataDir, "session.key"),
+	} {
+		if b, err := os.ReadFile(p); err == nil {
+			if s := strings.TrimSpace(string(b)); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func localSignHeaders(method, pathWithQuery string) map[string]string {
+	ts := strconv.FormatInt(time.Now().UnixMilli(), 10) // 毫秒
+	rnd := make([]byte, 12)
+	rand.Read(rnd)
+	nonce := hex.EncodeToString(rnd)
+	payload := strings.Join([]string{"local-v1", strings.ToUpper(method), pathWithQuery, ts, nonce}, "\n")
+	mac := hmac.New(sha256.New, []byte(sessionKey))
+	mac.Write([]byte(payload))
+	return map[string]string{
+		"X-SA-Sign-Version": "local-v1",
+		"X-SA-Timestamp":    ts,
+		"X-SA-Nonce":        nonce,
+		"X-SA-Signature":    base64.RawURLEncoding.EncodeToString(mac.Sum(nil)),
+	}
+}
+
+// 在本地内核里真建一个会话，返回它的 id（失败返回 ""）
+func createKernelSession() string {
+	if sessionKey == "" {
+		return ""
+	}
+	body := `{"title":"pi"}`
+	req, err := http.NewRequest("POST", kernelURL+"/session", strings.NewReader(body))
+	if err != nil {
+		return ""
+	}
+	for k, v := range localSignHeaders("POST", "/session") {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	cl := &http.Client{Timeout: 10 * time.Second}
+	resp, err := cl.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	var out struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(b, &out) == nil && strings.HasPrefix(out.ID, "ses_") {
+		return out.ID
+	}
+	return ""
+}
+
+func sha1hex(b []byte) string { s := sha1.Sum(b); return hex.EncodeToString(s[:]) }
+
+// 对话指纹：取第一条 user 消息（跨轮稳定）
+func convKey(msgs []json.RawMessage) string {
+	for _, m := range msgs {
+		var h struct {
+			Role string `json:"role"`
+		}
+		if json.Unmarshal(m, &h) == nil && h.Role == "user" {
+			return sha1hex(m)
+		}
+	}
+	all := make([][]byte, 0, len(msgs))
+	for _, m := range msgs {
+		all = append(all, []byte(m))
+	}
+	return sha1hex(bytes.Join(all, nil))
+}
+
+// 为一个对话拿到（或创建）会话 ID：优先真实内核会话，失败则形状对齐的合成 ID
+func sessionFor(body []byte) string {
+	var r struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	_ = json.Unmarshal(body, &r)
+	key := convKey(r.Messages)
+
+	sessMu.Lock()
+	defer sessMu.Unlock()
+	if id, ok := sessByConv[key]; ok {
+		return id
+	}
+	id := createKernelSession()
+	real := id != ""
+	if !real {
+		id = kernID("ses")
+	}
+	sessByConv[key] = id
+	log.Printf("[go-shim] new session for conversation %s -> %s (real=%v)", key[:8], id, real)
+	return id
+}
 
 func decryptToken() (string, error) {
 	tp := filepath.Join(dataDir, "users", account, "app-auth", "token.json")
@@ -298,11 +415,11 @@ func forward(body []byte, w http.ResponseWriter, streaming bool) {
 		serveErr(w, 500, err.Error())
 		return
 	}
-	doReq := func(tok string) (*http.Response, error) {
+	sesID := sessionFor(body) // 真内核会话（拿不到则退化为合成 ID）
+	doReq := func(tok string, sesID string) (*http.Response, error) {
 		ts := time.Now().Unix()
 		nonce := uuid4()
 		sig := sign(tok, "POST", signPath, ts, nonce, body)
-		sesID := kernID("ses")
 		req, err := http.NewRequest("POST", gatewayURL, strings.NewReader(string(body)))
 		if err != nil {
 			return nil, err
@@ -333,11 +450,11 @@ func forward(body []byte, w http.ResponseWriter, streaming bool) {
 		// Accept-Encoding 交给 Transport 自动加（与内核一致，出现在最后）
 		return client.Do(req)
 	}
-	resp, err := doReq(token)
+	resp, err := doReq(token, sesID)
 	if err == nil && (resp.StatusCode == 401 || resp.StatusCode == 403) {
 		resp.Body.Close()
 		if t2, e2 := getToken(true); e2 == nil {
-			resp, err = doReq(t2)
+			resp, err = doReq(t2, sesID)
 		}
 	}
 	if err != nil {
@@ -389,6 +506,7 @@ func main() {
 	if err := loadAESKey(); err != nil {
 		log.Printf("[warn] %v", err)
 	}
+	sessionKey = loadSessionKey()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		models := []map[string]any{}
@@ -409,6 +527,11 @@ func main() {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	log.Printf("[go-shim] listening on http://%s/v1", addr)
 	log.Printf("[go-shim] account=%s deviceId=%s installId=%s", account, deviceID, installID)
+	if sessionKey != "" {
+		log.Printf("[go-shim] 内核会话支持: 开（session.key 已加载，X-Session-Id 为真实会话）")
+	} else {
+		log.Printf("[go-shim] 内核会话支持: 关（未见 session.key，X-Session-Id 用合成 ID；如需真会话请跑 get-session-key.py）")
+	}
 	if _, err := getToken(false); err != nil {
 		log.Printf("[go-shim] token load failed: %v", err)
 	} else {

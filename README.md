@@ -41,16 +41,29 @@
 
 ## 0. 快速开始（老手看这段就够）
 
+> **推荐用 Go 版**（传输层指纹与 TeleAgent 内核一致 + 用真实内核会话）。
+
 ```bash
 # 一次性：解出 safeStorage 的 AES key -> token.key
 scripts\setup.cmd
 
-# 每次开机：启动本地接口（127.0.0.1:8788）
-scripts\start-shim.cmd
+# 一次性：编译 Go 版（需 go1.26.x，与内核同版本；见 §2.6）
+scripts\go\build.cmd
+
+# 每次开机（前提：TeleAgent 已打开并登录）
+scripts\start-shim-go.cmd      # 自动取本地会话密钥 + 启动
 
 # 验证
 curl http://127.0.0.1:8788/v1/models
 ```
+
+<details>
+<summary>备选：Node 版（不装 Go 时可用）</summary>
+
+```bash
+scripts\start-shim.cmd
+```
+</details>
 
 然后在客户端里填：
 ```
@@ -148,19 +161,24 @@ User-Agent: super-agent/1.0
 - **不要**用错误签名反复试探网关 —— 会触发风控（`40105 疑似攻击` → `40109 封号`）。这是本仓库作者踩过的坑。
 - `token.json` 有效期约 3~4 天，shim 会在 401/403 时自动重新解密；token 彻底过期需重开 App 登录。
 
-### 2.6 ★ 想要传输层也像 App？用 Go 版
+### 2.6 ★ 想要传输层也像 App？用 Go 版（推荐）
 
 Node 版的 HTTP 头可以对齐，但 **TLS ClientHello 指纹**（Go vs Node/OpenSSL）无法伪装。
-因此提供了一个 **用内核同版本 Go（1.26.5）编译**的实现：
+因此**主推 Go 版**：用内核同版本 Go（1.26.5）+ 默认 `net/http`、`crypto/tls` 编译。
 
 ```
 scripts\go\main.go          # 源码
 scripts\go\build.cmd        # 编译 -> scripts\teleagent-shim.exe
-scripts\start-shim-go.cmd   # 启动
+scripts\start-shim-go.cmd   # 启动（自动取会话密钥）
 ```
 
-实测从自己的进程内存 dump 出来的 wire，与内核请求**逐字段逐顺序一致**。
+Go 版比 Node 版多两件事：
+1. **传输层指纹与内核同源** —— 实测从自己进程内存 dump 出的 wire 与内核请求**逐字段逐顺序一致**；
+2. **`X-Session-Id` 用真实内核会话** —— 每个对话调内核 `POST /session` 建一个真会话并在后续轮次复用，
+   而不是每次随机生成（见 [`docs/wire-fidelity.md`](docs/wire-fidelity.md)）。
+
 完整对比与原理见 [`docs/wire-fidelity.md`](docs/wire-fidelity.md)。
+Node 版保留作为“不想装 Go”时的备选（头已对齐，但会话 ID 为合成、TLS 指纹不同）。
 
 ---
 
@@ -443,17 +461,17 @@ netstat -ano | findstr :8788                                   # 在跑吗
 | [`ban-risk.md`](docs/ban-risk.md) | 封号机理、触发因素、规避建议（含真实案例时间线） |
 | [`recon-notes.md`](docs/recon-notes.md) | 逆向过程：二进制地址、内存扫描方法、错误码表 |
 
-**方案 A（直连网关，支持自定义 tools）**
+**方案 A（直连网关，支持自定义 tools）—— ★ 推荐用 Go 版**
 
 | 文件 | 内容 |
 |---|---|
-| `scripts/teleagent-shim.js` | Node 版实现（头已对齐内核；自动探测 account / device / install） |
-| `scripts/go/main.go` | **Go 版实现**（传输层指纹与内核一致；推荐） |
-| `scripts/go/build.cmd` / `scripts/start-shim-go.cmd` | 编译 / 启动 Go 版 |
-| `scripts/teleagent-shim.exe` | Go 版产物（不入库，自行编译） |
-| `scripts/setup.py` / `setup.cmd` | 一次性：解出 safeStorage AES key → `token.key` |
+| `scripts/go/main.go` | **Go 版实现（主推）**：同版本 Go 1.26.5，传输层指纹与内核一致 + 真内核会话 |
+| `scripts/go/build.cmd` | 编译 → `scripts/teleagent-shim.exe` |
+| `scripts/start-shim-go.cmd` | 启动 Go 版（自动取会话密钥） |
+| `scripts/teleagent-shim.js` | Node 版（备选，头已对齐；TLS 指纹不同、会话 ID 为合成） |
 | `scripts/start-shim.cmd` | 启动 Node 版 |
-| `scripts/scan-gateway-req.py` | 从内核/自身进程内存 dump 真实 wire 请求（做对比用） |
+| `scripts/setup.py` / `setup.cmd` | 一次性：解出 safeStorage AES key → `token.key` |
+| `scripts/scan-gateway-req.py` / `compare-wire.py` | 从进程内存 dump / 对比真实 wire 请求 |
 | `scripts/scan-req-body.py` | dump 请求 body 结构与是否带 tools |
 
 **方案 B（走 App 本地 server，可用内核自带工具）**
@@ -469,6 +487,6 @@ netstat -ano | findstr :8788                                   # 在跑吗
 
 ---
 
-**一句话**：方案 A 装一次（`setup.cmd`）→ 开机双击 `start-shim.cmd`；方案 B 开机双击 `start-local-shim.cmd`。
+**一句话**：方案 A 装一次（`setup.cmd`）→ 编译一次（`go\build.cmd`）→ 之后开机双击 `start-shim-go.cmd`（推荐）或 `start-shim.cmd`。
 两者都监听 `127.0.0.1:8788/v1`，客户端配置不用改。
-**要安全**选 B；**要自定义工具（pi 编码）**选 A。
+**要安全**选方案 B（走 App 本地 server）；**要自定义工具（pi 编码）**选方案 A（优先 Go 版）。
