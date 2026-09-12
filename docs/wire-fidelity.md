@@ -46,6 +46,27 @@ Accept-Encoding: gzip
 - `X-Request-Id` 是 **UUIDv7**（`01a09356-...`，第 7 字节 version nibble = 7）。
 - `X-Message-Id` / `X-Session-Id` 形状：`<prefix>_` + **12 位十六进制** + **14 位 base62**；
   其中 hex 段随时间是**递减**的（近似取反的时间戳），例如 `ses_f6ca40887ffe...`。
+  实测：`msg_*` 的 hex 低 12 位固定为 `001`，`ses_*` 固定为 `ffe`；高位部分 ≈ `~毫秒时间戳`。
+  本仓库 shim 只对齐了**形状**（12hex+14base62），内部编码未逐位复刻（网关不校验，实测随机 ID 也返 200）。
+
+## 1.1 实测：Go 版 vs 内核（逐字段对比）
+
+用 `scripts/compare-wire.py <内核pid> <shim pid>` 从两边进程内存各 dump 一条真实请求对比，结果：
+
+```
+请求行一致: True
+A 头顺序(25): Host, User-Agent, Content-Length, Accept, Authorization, Cache-Control, Connection,
+  Content-Type, X-App-Version, X-Message-Id, X-Request-Id, X-Route-Target, X-Session-Id,
+  X-Superagent-*, X-Teleai-*, X-Token, Accept-Encoding
+B 头顺序(25): （完全相同）
+【顺序完全一致】: True
+只有 A(内核) 有: 无
+只有 B(shim) 有: 无
+--- 逐字段: 25/25 [OK]（静态值全等；动态值仅签名/时间戳/nonce/ID/长度不同）
+```
+
+动态字段格式也对齐：`X-Request-Id` 两边都是 **UUIDv7**（`01a0935f-...` 时间前缀相同）、
+`msg_`/`ses_` 形状相同、`X-Token` 为**同一个 JWT**。
 - **body 里带 `tools`**（OpenAI 风格函数定义，第一个是 `read`）→ 印证网关原生支持工具调用。
 - 请求头里**没有** `X-Device-Os` / `X-Device-Os-Version`。
 
