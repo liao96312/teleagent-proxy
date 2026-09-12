@@ -387,22 +387,46 @@ setx TA_API_KEY "my-secret-123"     # 永久；重启 shim 生效
 
 ## 7. 二次使用 / 一键恢复
 
-重启电脑后：
-1. 确认 **TeleAgent 已打开并登录**（方案 B 必须；方案 A 只要 token 没过期可不开）。
-2. 双击启动脚本：
-   - **方案 B（推荐，最安全）**：`scripts\start-local-shim.cmd`（会先自动取本地会话密钥）
-   - 方案 A（支持工具调用）：`scripts\start-shim.cmd`
+重启电脑后：**确认 TeleAgent 已打开并登录**，然后双击启动脚本：
 
-两个方案都监听**同一个端口 8788**，所以**客户端/pi 配置无需改动**，换着跑即可。
+| 方式 | 脚本 | 前提 | 说明 |
+|---|---|---|---|
+| **★ Go 版（推荐）** | `scripts\start-shim-go.cmd` | **App 必须开着** | 自动取会话密钥 → 真会话；首次运行会自动编译 |
+| Node 版 | `scripts\start-shim.cmd` | token 未过期即可（App 可不开） | 头已对齐；TLS 指纹不同、会话 ID 为合成 |
+| 方案 B | `scripts\start-local-shim.cmd` | **App 必须开着** | 走内核，出站流量最像 App；无自定义 tools |
 
-**不需要再跑 setup**（`token.key` 一直在，除非换机器/重装系统）。
+三者都监听**同一个端口 8788**，所以**客户端/pi 配置无需改动**，换着跑即可。
 
-**开机自启（可选）**：把 `start-shim.cmd` 的快捷方式放进 `shell:startup`，或建「登录时运行」的计划任务。
+**不需要再跑 `setup.cmd`**（`token.key` 一直在，除非换机器 / 重装系统）。
+**Go 版也不需要每次重新编译**（`teleagent-shim.exe` 在那儿就用）。
 
-**常用检查**：
+### 7.1 开机自启（可选）
+
+把 **`start-shim-go.cmd`**（或其它两个）的快捷方式放进 `shell:startup`，或建「登录时运行」的计划任务。
+
+> ⚠️ Go 版和方案 B 都依赖 TeleAgent 已启动。开机自启请**延迟 1~2 分钟**再跑（计划任务里设“延迟”），
+> 否则脚本会因为内核还没起来而退化为合成会话 ID。
+
+### 7.2 常用检查
+
 ```powershell
-netstat -ano | findstr :8788                                   # 在跑吗
-"%USERPROFILE%\.local\share\TeleAgent\runtimes\node\node.exe" teleagent-shim.js   # 前台跑看日志
+netstat -ano | findstr :8788                       # 在跑吗
+curl http://127.0.0.1:8788/v1/models              # 接口通吗
+
+# 前台跑看日志（Go 版）
+scripts\teleagent-shim.exe
+
+# 前台跑看日志（Node 版）
+"%USERPROFILE%\.local\share\TeleAgent\runtimes\node\node.exe" scripts\teleagent-shim.js
+```
+
+Go 版启动日志长这样：
+```
+[go-shim] listening on http://127.0.0.1:8788/v1
+[go-shim] account=v1_public_xxx deviceId=... installId=...
+[go-shim] apiKey 校验: 关（本地任意 key 均可）
+[go-shim] 内核会话支持: 开（session.key 已加载，X-Session-Id 为真实会话）
+[go-shim] token loaded OK
 ```
 
 ---
@@ -413,22 +437,30 @@ netstat -ano | findstr :8788                                   # 在跑吗
 
 1. 对方装好 TeleAgent 并登录；
 2. 双击 `setup.cmd`（生成**对方自己的** `token.key`）；
-3. 双击 `start-shim.cmd`；
-4. 按 §4 配置对方的 pi。
+3. （推荐）装 go1.26.x，跑 `go\build.cmd` 编译 Go 版；
+4. 双击 `start-shim-go.cmd`（或 `start-shim.cmd`）；
+5. 按 §4 配置对方的 pi。
 
-**已自动探测、无需手改**：账号目录 `users/v1_public_*`、`deviceId`/`installId`（读 `app-auth/device-meta.json`）、`token.json` 路径、Node/Python 路径。
+**已自动探测、无需手改**：账号目录（选**有 token.json 且最新的** `users/v1_public_*`）、
+`deviceId`/`installId`（读 `app-auth/device-meta.json`）、`token.json` / `token.key` / `session.key` 路径、Node/Python 路径。
 
-**可用环境变量覆盖**：
+**全部环境变量**（两个版本通用，带 ★ 的仅 Go 版用到）：
 
 | 变量 | 作用 | 默认 |
 |---|---|---|
 | `TA_PORT` | shim 监听端口 | `8788` |
 | `TA_AES_KEY` | 直接提供 AES key（不读 token.key） | 读 `token.key` |
+| `TA_API_KEY` | 设了就要求客户端带此 key（否则 401） | 空 = 不校验 |
 | `TA_DATA_DIR` | TeleAgent 数据目录 | `%USERPROFILE%\.local\share\TeleAgent` |
-| `TA_ACCOUNT` | 账号分区目录名 | 自动取 `users/v1_public_*` 第一个 |
+| `TA_ACCOUNT` | 账号分区目录名 | 自动选有 token.json 且最新的那个 |
 | `TA_DEVICE_ID` / `TA_INSTALL_ID` | 覆盖设备号 | 读 `device-meta.json` |
 | `TA_APP_VERSION` | `X-App-Version` | `2.5.0` |
 | `TA_SK` | 通道密钥 | 内嵌默认值 |
+| ★ `TA_KERNEL_URL` | 内核本地地址（建真会话用） | `http://127.0.0.1:4397` |
+| ★ `TA_SESSION_KEY` | 本地签名密钥（不读 `session.key`） | 读 `session.key` |
+
+> 若不想装 Go：直接用 `start-shim.cmd`（Node 版），功能一样，只是 TLS 指纹不同、
+> `X-Session-Id` 为合成 ID。
 
 ---
 

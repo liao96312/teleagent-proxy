@@ -52,6 +52,7 @@ var (
 	appVersion = envOr("TA_APP_VERSION", "2.5.0")
 	sk         = envOr("TA_SK", defaultSK)
 	kernelURL  = envOr("TA_KERNEL_URL", "http://127.0.0.1:4397")
+	apiKey     = os.Getenv("TA_API_KEY") // 非空则要求客户端带此 key
 	account    string
 	deviceID   string
 	installID  string
@@ -508,7 +509,21 @@ func main() {
 	}
 	sessionKey = loadSessionKey()
 	mux := http.NewServeMux()
+	// 可选的本地 key 校验（设了 TA_API_KEY 才开）
+	authOK := func(w http.ResponseWriter, r *http.Request) bool {
+		if apiKey == "" {
+			return true
+		}
+		if strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")) == apiKey {
+			return true
+		}
+		serveErr(w, 401, "invalid api key")
+		return false
+	}
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
+		if !authOK(w, r) {
+			return
+		}
 		models := []map[string]any{}
 		for _, id := range []string{"chat-pro", "chat-lite", "chat-flash"} {
 			models = append(models, map[string]any{"id": id, "object": "model", "owned_by": "teleai"})
@@ -517,6 +532,9 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": models})
 	})
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		if !authOK(w, r) {
+			return
+		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			serveErr(w, 400, err.Error())
@@ -527,6 +545,11 @@ func main() {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	log.Printf("[go-shim] listening on http://%s/v1", addr)
 	log.Printf("[go-shim] account=%s deviceId=%s installId=%s", account, deviceID, installID)
+	if apiKey != "" {
+		log.Printf("[go-shim] apiKey 校验: 开（TA_API_KEY）")
+	} else {
+		log.Printf("[go-shim] apiKey 校验: 关（本地任意 key 均可）")
+	}
 	if sessionKey != "" {
 		log.Printf("[go-shim] 内核会话支持: 开（session.key 已加载，X-Session-Id 为真实会话）")
 	} else {
