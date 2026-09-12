@@ -30,6 +30,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -225,14 +226,14 @@ func localSignHeaders(method, pathWithQuery string) map[string]string {
 }
 
 // 在本地内核里真建一个会话，返回它的 id（失败返回 ""）
-func createKernelSession() string {
+func kernelSessionOnce() (string, int) {
 	if sessionKey == "" {
-		return ""
+		return "", 0
 	}
 	body := `{"title":"pi"}`
 	req, err := http.NewRequest("POST", kernelURL+"/session", strings.NewReader(body))
 	if err != nil {
-		return ""
+		return "", 0
 	}
 	for k, v := range localSignHeaders("POST", "/session") {
 		req.Header.Set(k, v)
@@ -241,15 +242,68 @@ func createKernelSession() string {
 	cl := &http.Client{Timeout: 10 * time.Second}
 	resp, err := cl.Do(req)
 	if err != nil {
-		return ""
+		return "", 0
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return "", resp.StatusCode
+	}
 	var out struct {
 		ID string `json:"id"`
 	}
 	if json.Unmarshal(b, &out) == nil && strings.HasPrefix(out.ID, "ses_") {
-		return out.ID
+		return out.ID, 200
+	}
+	return "", 200
+}
+
+// 密钥失效（App 重启过）→ 重跑 get-session-key.py 重新抓一次
+func refreshSessionKeyViaPython() bool {
+	py := ""
+	cands := []string{
+		filepath.Join(home(), ".local", "share", "TeleAgent", "runtimes", "python", "python.exe"),
+		"python",
+	}
+	for _, c := range cands {
+		if c == "python" {
+			py = c
+			break
+		}
+		if st, err := os.Stat(c); err == nil && !st.IsDir() {
+			py = c
+			break
+		}
+	}
+	if py == "" {
+		return false
+	}
+	cmd := exec.Command(py, filepath.Join(exeDir(), "get-session-key.py"))
+	cmd.Dir = exeDir()
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		return false
+	}
+	if k := loadSessionKey(); k != "" {
+		sessionKey = k
+		log.Printf("[go-shim] 会话密钥已重新获取（App 重启过）")
+		return true
+	}
+	return false
+}
+
+func createKernelSession() string {
+	id, code := kernelSessionOnce()
+	if id != "" {
+		return id
+	}
+	if code == 401 || code == 403 {
+		if refreshSessionKeyViaPython() {
+			if id2, _ := kernelSessionOnce(); id2 != "" {
+				return id2
+			}
+		}
 	}
 	return ""
 }
