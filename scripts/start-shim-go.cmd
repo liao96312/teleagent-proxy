@@ -1,24 +1,29 @@
 @echo off
-rem start-shim-go.cmd â€” å¯åŠ¨ Go ç‰ˆ shimï¼ˆæŽ¨èï¼›ä¼ è¾“å±‚æŒ‡çº¹ä¸Žå†…æ ¸ä¸€è‡´ + çœŸä¼šè¯ï¼‰
-rem å‰ç½®ï¼šTeleAgent æ­£åœ¨è¿è¡Œä¸”å·²ç™»å½•ï¼ˆçœŸä¼šè¯ä¸Ž session.key éƒ½ä¾èµ–å®ƒï¼‰
+rem start-shim-go.cmd - Æô¶¯ Go °æ shim£¨ÍÆ¼ö£º´«Êä²ãÖ¸ÎÆÓëÄÚºËÒ»ÖÂ£©
+rem
+rem Ä¬ÈÏÄ£Ê½£º²»ÒÀÀµ TeleAgent ÊÇ·ñÔËÐÐ£¬»á»° ID ÓÃ¾«È·¸´¿ÌµÄ±¾µØËã·¨Éú³É¡£
+rem ÈçÐèÏòÄÚºË½¨"Õæ»á»°"£¬Éè TA_REAL_SESSION=1£¨ÄÇÊ±²ÅÐèÒª App ÔËÐÐ + session.key£©¡£
 setlocal
 cd /d "%~dp0"
 
 if not exist "teleagent-shim.exe" (
-  echo [1/3] æ²¡æ‰¾åˆ° teleagent-shim.exeï¼Œæ­£åœ¨ç¼–è¯‘...
+  echo [1/3] Ã»ÕÒµ½ teleagent-shim.exe£¬ÕýÔÚ±àÒë...
   call "%~dp0go\build.cmd"
   if errorlevel 1 exit /b 1
 )
 
-set PY=%USERPROFILE%\.local\share\TeleAgent\runtimes\python\python.exe
-if not exist "%PY%" set PY=python
-echo [2/3] èŽ·å–å†…æ ¸æœ¬åœ°ä¼šè¯å¯†é’¥ï¼ˆç”¨äºŽåˆ›å»ºçœŸå®žä¼šè¯ï¼Œå¯é€‰ä½†æŽ¨èï¼‰...
-"%PY%" "%~dp0get-session-key.py"
-if errorlevel 1 echo [!] å–å¯†é’¥å¤±è´¥ â€”â€” shim ä¼šé€€åŒ–ä¸ºåˆæˆä¼šè¯ IDï¼ˆä»å¯ç”¨ï¼‰
+if "%TA_REAL_SESSION%"=="1" (
+  set "PY=%USERPROFILE%\.local\share\TeleAgent\runtimes\python\python.exe"
+  if not exist "%PY%" set "PY=python"
+  echo [2/3] TA_REAL_SESSION=1 -^> »ñÈ¡ÄÚºË±¾µØ»á»°ÃÜÔ¿...
+  "%PY%" "%~dp0get-session-key.py"
+) else (
+  echo [2/3] Ä¬ÈÏÄ£Ê½£º±¾µØÉú³É¾«È·»á»° ID£¨²»ÒÀÀµ App£©
+)
 
-echo [3/3] å¯åŠ¨ Go ç‰ˆ shimï¼ˆåŽå°éšè—ï¼‰...
+echo [3/3] Æô¶¯ Go °æ shim£¨ºóÌ¨Òþ²Ø£©...
 powershell -NoProfile -Command "Start-Process -FilePath '%~dp0teleagent-shim.exe' -WorkingDirectory '%~dp0' -WindowStyle Hidden"
 echo.
-echo å®Œæˆ -^> http://127.0.0.1:8788/v1   ï¼ˆæ¨¡åž‹: chat-pro / chat-lite / chat-flashï¼‰
-echo è‡ªæ£€: curl http://127.0.0.1:8788/v1/models
+echo Íê³É -^> http://127.0.0.1:8788/v1   £¨Ä£ÐÍ: chat-pro / chat-lite / chat-flash£©
+echo ×Ô¼ì: curl http://127.0.0.1:8788/v1/models
 echo.

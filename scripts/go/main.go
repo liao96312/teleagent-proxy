@@ -65,8 +65,10 @@ var (
 	cachedTok  string
 	cachedAt   time.Time
 
-	sessionKey  string // 内核本地签名密钥（用于创建真会话）
-	realSession = os.Getenv("TA_REAL_SESSION") != "0" // 默认尝试建真内核会话
+	sessionKey  string // 内核本地签名密钥（仅在 TA_REAL_SESSION=1 时需要）
+	// 默认【关】：直接用精确复刻的本地 ID，不依赖 App、不需要 session.key
+	// 设 TA_REAL_SESSION=1 则改为向内核建真会话（需要 App 运行）
+	realSession = os.Getenv("TA_REAL_SESSION") == "1"
 	sessMu      sync.Mutex
 	sessByConv  = map[string]string{} // 对话指纹 -> 内核会话ID
 )
@@ -713,7 +715,10 @@ func main() {
 	if err := loadAESKey(); err != nil {
 		log.Printf("[warn] %v", err)
 	}
-	sessionKey = loadSessionKey()
+	sessionKey = ""
+	if realSession {
+		sessionKey = loadSessionKey()
+	}
 	mux := http.NewServeMux()
 	// 可选的本地 key 校验（设了 TA_API_KEY 才开）
 	authOK := func(w http.ResponseWriter, r *http.Request) bool {
@@ -769,10 +774,14 @@ func main() {
 	} else {
 		log.Printf("[go-shim] apiKey 校验: 关（本地任意 key 均可）")
 	}
-	if sessionKey != "" && realSession {
-		log.Printf("[go-shim] 内核会话: 开（会向内核建真会话；App 关了则自动退化为精确格式的本地 ID）")
+	if realSession {
+		if sessionKey != "" {
+			log.Printf("[go-shim] 内核会话: 开（会向内核建真会话；需 App 在运行）")
+		} else {
+			log.Printf("[go-shim] 内核会话: 开但无 session.key（跑 get-session-key.py 可补）")
+		}
 	} else {
-		log.Printf("[go-shim] 内核会话: 关（直接用精确复刻的本地 ID，不依赖 App）")
+		log.Printf("[go-shim] 内核会话: 关（本地精确 ID，不依赖 App；设 TA_REAL_SESSION=1 可开）")
 	}
 	if _, err := getToken(false); err != nil {
 		log.Printf("[go-shim] token load failed: %v", err)

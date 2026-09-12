@@ -436,9 +436,15 @@ setx TA_API_KEY "my-secret-123"     # 永久；重启 shim 生效
 
 | 方式 | 脚本 | 前提 | 说明 |
 |---|---|---|---|
-| **★ Go 版（推荐）** | `scripts\start-shim-go.cmd` | **App 必须开着** | 自动取会话密钥 → 真会话；首次运行会自动编译 |
-| Node 版 | `scripts\start-shim.cmd` | token 未过期即可（App 可不开） | 头已对齐；TLS 指纹不同、会话 ID 为合成 |
+| **★ Go 版（推荐）** | `scripts\start-shim-go.cmd` | **不需要 App** | 会话 ID 本地精确生成；传输层指纹与内核一致 |
+| Node 版 | `scripts\start-shim.cmd` | token 未过期即可（App 可不开） | 头已对齐；TLS 指纹不同、会话 ID 为近似格式 |
 | 方案 B | `scripts\start-local-shim.cmd` | **App 必须开着** | 走内核，出站流量最像 App；无自定义 tools |
+
+> Go 版默认 **不依赖 TeleAgent 是否运行**。只有一个硬限制：**token 6 天过期**，
+> 到期后必须重开 App 登录一次（`token.json` 不会自己刷新）。
+>
+> 若想让它向内核建“真会话”（需 App 运行），设 `TA_REAL_SESSION=1`——
+> 但实测意义不大（云端看不到内核的会话列表，且 ID 格式已精确对齐，见 wire-fidelity §4.1）。
 
 三者都监听**同一个端口 8788**，所以**客户端/pi 配置无需改动**，换着跑即可。
 
@@ -447,10 +453,10 @@ setx TA_API_KEY "my-secret-123"     # 永久；重启 shim 生效
 
 ### 7.1 开机自启（可选）
 
-把 **`start-shim-go.cmd`**（或其它两个）的快捷方式放进 `shell:startup`，或建「登录时运行」的计划任务。
+把 **`start-shim-go.cmd`** 的快捷方式放进 `shell:startup`，或建「登录时运行」的计划任务。
 
-> ⚠️ Go 版和方案 B 都依赖 TeleAgent 已启动。开机自启请**延迟 1~2 分钟**再跑（计划任务里设“延迟”），
-> 否则脚本会因为内核还没起来而退化为合成会话 ID。
+> Go 版默认不依赖 App，**无需延迟等待**。
+> （方案 B、或 Go 版设了 `TA_REAL_SESSION=1` 时才需要等 TeleAgent 先起来。）
 
 ### 7.2 常用检查
 
@@ -470,7 +476,7 @@ Go 版启动日志长这样：
 [go-shim] listening on http://127.0.0.1:8788/v1
 [go-shim] account=v1_public_xxx deviceId=... installId=...
 [go-shim] apiKey 校验: 关（本地任意 key 均可）
-[go-shim] 内核会话支持: 开（session.key 已加载，X-Session-Id 为真实会话）
+[go-shim] 内核会话: 关（本地精确 ID，不依赖 App；设 TA_REAL_SESSION=1 可开）
 [go-shim] token loaded OK
 ```
 
@@ -501,8 +507,9 @@ Go 版启动日志长这样：
 | `TA_DEVICE_ID` / `TA_INSTALL_ID` | 覆盖设备号 | 读 `device-meta.json` |
 | `TA_APP_VERSION` | `X-App-Version` | `2.5.0` |
 | `TA_SK` | 通道密钥 | 内嵌默认值 |
-| ★ `TA_KERNEL_URL` | 内核本地地址（建真会话用） | `http://127.0.0.1:4397` |
+| ★ `TA_KERNEL_URL` | 内核本地地址（向内核建真会话时用） | `http://127.0.0.1:4397` |
 | ★ `TA_SESSION_KEY` | 本地签名密钥（不读 `session.key`） | 读 `session.key` |
+| ★ `TA_REAL_SESSION` | `1` = 向内核建真会话（需 App 运行）；默认 `0` = 本地精确生成会话 ID | `0` |
 
 > 若不想装 Go：直接用 `start-shim.cmd`（Node 版），功能一样，只是 TLS 指纹不同、
 > `X-Session-Id` 为合成 ID。

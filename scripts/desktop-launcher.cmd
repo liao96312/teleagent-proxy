@@ -1,7 +1,8 @@
 @echo off
 rem ============================================================
 rem  启动 TeleAgent 反代 shim（Go 版，推荐）
-rem  双击即可。会自动：编译(首次) -> 解 AES key -> 取会话密钥 -> 启动 -> 自检
+rem  双击即可。会自动：编译(首次) -> 解 AES key -> 启动 -> 自检
+rem  默认不依赖 TeleAgent 是否运行；如需真内核会话，设 TA_REAL_SESSION=1
 rem ============================================================
 setlocal
 set "REPO=%USERPROFILE%\Desktop\teleagent-proxy"
@@ -23,7 +24,7 @@ echo   TeleAgent 反代 shim 启动
 echo ============================================
 echo.
 
-%PS% "if (Get-Process TeleAgent -ErrorAction SilentlyContinue) { Write-Host '[ok] TeleAgent 正在运行' } else { Write-Host '[!] TeleAgent 没在运行。'; Write-Host '    仍能启动，但 X-Session-Id 会是合成 ID（不是内核真会话）。'; Write-Host '    建议先打开 TeleAgent 并登录。' }"
+%PS% "if (Get-Process TeleAgent -ErrorAction SilentlyContinue) { Write-Host '[ok] TeleAgent 正在运行' } else { Write-Host '[i] TeleAgent 没在运行 —— 默认模式不受影响，照常可用' }"
 echo.
 
 if not exist "teleagent-shim.exe" (
@@ -41,9 +42,13 @@ if exist "token.key" (
   "%PY%" "setup.py"
 )
 
-echo [3/4] 获取内核本地会话密钥...
-"%PY%" "get-session-key.py"
-if errorlevel 1 echo [!] 取密钥失败 —— 会话 ID 会退化为合成 ID（功能不受影响）
+echo [3/4] 准备会话...
+if "%TA_REAL_SESSION%"=="1" (
+  echo       TA_REAL_SESSION=1 -^> 向内核建真会话，取会话密钥...
+  "%PY%" "get-session-key.py"
+) else (
+  echo       默认模式：本地生成精确会话 ID（不依赖 App）
+)
 
 echo [4/4] 启动 shim...
 %PS% "Get-NetTCPConnection -State Listen -LocalPort 8788 -ErrorAction SilentlyContinue | Select-Object -First 1 | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }" 2>nul
