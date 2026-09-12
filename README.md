@@ -16,7 +16,7 @@
 | 需要 App 开着 | ❌ 不需要（token 有效期内可独立跑） | ✅ 必须开着 |
 | 需要读 App 内存 | ❌ | ✅（取本地会话密钥） |
 | 被封风险 | **较高** | **低**（但仍非零） |
-| **工具调用** | ✅ **支持**（网关原生 OpenAI，可传自定义 tools） | ❌ **不支持自定义工具**（内核用它自带的工具集） |
+| **工具调用** | ✅ 支持**自定义 tools**（网关原生 OpenAI） | ✅ 支持**内核自带工具**（bash / 读写文件 / 生图 / 联网搜索 / MCP）<br>❌ 不接受调用方自定义的 `tools` |
 | 实现状态 | **已实现**（`scripts/teleagent-shim.js`） | **已实现**（`scripts/teleagent-local-shim.js`） |
 
 > ⚠️ **合规与风险**：把 App 内额度搬到 App 外使用，违反服务商条款。**已有账号因本方法被封（`40109 current user is banned`）的真实案例**，详见 [`docs/ban-risk.md`](docs/ban-risk.md)。请仅在你自己的机器、自己的账号上研究，**风险自担**。想零风险请直接用官方 App。
@@ -153,8 +153,9 @@ User-Agent: super-agent/1.0
 ## 3. 方案 B：走 App 本地 server
 
 > ✅ **已实现可用**：`scripts/teleagent-local-shim.js`。
-> ⚠️ **重要限制：不支持自定义工具调用**（内核用它自己固定的工具集，会忽略请求里的 `tools`）。
-> 需要工具调用（如 pi 做编码）请用[方案 A](#2-方案-a直连云网关)，或见 [§3.6 工具限制](#36-工具调用限制重要)。
+> ✅ **可调用内核自带工具**（bash / 读写文件 / 生图 / 联网搜索 / MCP）。
+> ⚠️ **不接受调用方自定义的 `tools`**（pi 自己的工具链用不了）。
+> 需要自定义工具调用（如 pi 做编码）请用[方案 A](#2-方案-a直连云网关)，详见 [§3.6](#36-工具调用能力实测结论)。
 
 ### 3.0 快速使用
 
@@ -236,7 +237,7 @@ TeleAgent 进程内跑着一个**本地 HTTP server**（Go 写的 `hertz` 框架
 | GET | `/openapi` | 路由摘要 |
 | GET | `/global/event` | SSE 事件流 |
 
-模型选择：`{"providerID":"NewApi","modelID":"chat-pro"}`。
+模型选择：`{"providerID":"NewApi","modelID":"chat-pro"}`。完整接口/鉴权/环境变量见 [`docs/kernel-internals.md`](docs/kernel-internals.md)。
 
 ### 3.5 优缺点
 - ✅ 出站流量与 App 无异 → **被封风险最低**。
@@ -246,15 +247,25 @@ TeleAgent 进程内跑着一个**本地 HTTP server**（Go 写的 `hertz` 框架
 - ❌ App 必须开着；`sessionKey` 每次启动会变，需重新获取（脚本已自动化）。
 - ❌ 账号已被封时无用（App 自己也 401）。
 
-### 3.6 工具调用限制（重要）
+### 3.6 工具调用能力（实测结论）
 
-内核跑的是 **它自己的 agent 循环**，工具集是固定的（bash / 读写文件 / online_search / MCP 等，由内核配置决定）。
-实测：在 `/session/:id/message` 里传 OpenAI 风格的 `tools` 定义会被忽略，模型会直接回答“工具列表里没有 xxx”。
+内核跑的是**它自己的 agent 循环**，工具集固定但功能完整。**实测有效：**
+
+| 能力 | 状态 | 验证 |
+|---|---|---|
+| 执行命令（bash/PowerShell） | ✅ | 让它跑 `echo KERNEL_TOOL_OK`，真的执行并返回了 |
+| 读写文件 / 搜索 / diff | ✅ | 内核自带 |
+| **生图** | ✅ | 本仓库的 `assets/cover.png` 就是让它生成的 |
+| 联网搜索 | ✅ | 百度搜索 AK/SK、`mcp.exa.ai` |
+| MCP 扩展 | ✅ | `/config` 的 `mcp` 字段可挂 MCP server（默认挂了 playwright） |
+| **调用方自定义 `tools`** | ❌ | 在 `/session/:id/message` 里传 OpenAI 风格 `tools`，模型回答“工具列表里没有 xxx” |
 
 所以：
-- 只想**对话** → 方案 B 完全够用，且最安全。
-- 需要**自定义工具调用**（pi 做编码、跑代理循环）→ 只能用方案 A（直连网关，网关是真正的 OpenAI 端点、原生支持 tools）。
-- 桥接思路：内核支持在 `/config` 里配 **MCP server**，理论上可把外部工具注册给内核（但那样跑的是内核的 agent 循环，不是调用方的）。
+- **只想对话，或让 TeleAgent 自己干活**（自带工具已够强）→ 方案 B 完全够用，且最安全。
+- **需要把 pi 自己的工具（read/write/edit/bash）接进去跑编码循环** → 只能用方案 A（网关是真正的 OpenAI 端点，原生支持自定义 tools）。
+- 想给内核加工具：内核支持在 `/config` 配 **MCP server**，但那样跑的是**内核的** agent 循环。
+
+细节见 [`docs/kernel-internals.md`](docs/kernel-internals.md)。
 
 ---
 
@@ -395,24 +406,38 @@ netstat -ano | findstr :8788                                   # 在跑吗
 
 ---
 
-## 10. 文档索引
+## 10. 文档与文件索引
+
+**文档（`docs/`）**
 
 | 文件 | 内容 |
 |---|---|
-| [`docs/signature-algorithms.md`](docs/signature-algorithms.md) | **两套签名算法**（云网关两轮 HMAC + App 本地 `X-SA-Signature`）逐字段说明 |
-| [`docs/ban-risk.md`](docs/ban-risk.md) | 封号机理、触发因素、规避建议（含真实案例时间线） |
-| [`docs/recon-notes.md`](docs/recon-notes.md) | 逆向过程笔记：二进制地址、内存扫描方法、错误码表 |
-| `scripts/teleagent-shim.js` | **方案 A** 实现（直连网关，自动探测 account/device/install，支持工具调用） |
-| `scripts/setup.py` / `setup.cmd` | 一次性：解出 AES key |
+| [`kernel-internals.md`](docs/kernel-internals.md) | 内核/本地服务内部结构：进程与端️口、三层鉴权、注入的 env、OpenCode API、**自带工具与生图** |
+| [`signature-algorithms.md`](docs/signature-algorithms.md) | **两套签名算法**（云网关两轮 HMAC + 内核本地 `X-SA-*`）逐字段说明 |
+| [`ban-risk.md`](docs/ban-risk.md) | 封号机理、触发因素、规避建议（含真实案例时间线） |
+| [`recon-notes.md`](docs/recon-notes.md) | 逆向过程：二进制地址、内存扫描方法、错误码表 |
+
+**方案 A（直连网关，支持自定义 tools）**
+
+| 文件 | 内容 |
+|---|---|
+| `scripts/teleagent-shim.js` | 实现（自动探测 account / device / install；SSE 透传；工具调用实测可用） |
+| `scripts/setup.py` / `setup.cmd` | 一次性：解出 safeStorage AES key → `token.key` |
 | `scripts/start-shim.cmd` | 启动方案 A |
-| `scripts/teleagent-local-shim.js` | **方案 B** 实现（走 App 本地 server） |
-| `scripts/get-session-key.py` | 从 TeleAgent 进程内存取本地会话密钥 → `session.key` |
-| `scripts/start-local-shim.cmd` | 启动方案 B（含取密钥） |
-| `docs/signature-algorithms.md` | 两套签名算法 |
-| `docs/ban-risk.md` | 封号机理与真实案例 |
-| `docs/recon-notes.md` | 逆向过程与工具方法 |
+
+**方案 B（走 App 本地 server，可用内核自带工具）**
+
+| 文件 | 内容 |
+|---|---|
+| `scripts/teleagent-local-shim.js` | 实现（本地签名 + 会话映射 + SSE 模拟） |
+| `scripts/get-session-key.py` | 从 TeleAgent 进程内存取 `SUPER_AGENT_LOCAL_SESSION_KEY` → `session.key` |
+| `scripts/kernel-probe.js` | 带本地签名探测内核接口（调试用） |
+| `scripts/start-local-shim.cmd` | 启动方案 B（先取密钥再起 shim） |
+
+**其他**：`assets/cover.png`（封面，由 TeleAgent 生图工具生成）、`LICENSE`。
 
 ---
 
-**一句话**：装一次（`setup.cmd`）→ 之后开机双击（`start-shim.cmd`）→ 客户端填 `http://127.0.0.1:8788/v1`。
-**想更安全**：用方案 B（走 App 本地 server），出站流量与 App 一致。
+**一句话**：方案 A 装一次（`setup.cmd`）→ 开机双击 `start-shim.cmd`；方案 B 开机双击 `start-local-shim.cmd`。
+两者都监听 `127.0.0.1:8788/v1`，客户端配置不用改。
+**要安全**选 B；**要自定义工具（pi 编码）**选 A。

@@ -82,11 +82,17 @@ def dpapi_unprotect(data: bytes) -> bytes:
 
 ## 6. 本地（App 内核）签名
 
-- 前端 JS 类 `bOt` 负责给 `127.0.0.1:4397` 的请求签名。
-- `X-SA-Signature = base64url(HMAC-SHA256(sessionKey, ["local-v1", METHOD, path+search, Date.now()ms, 12Bhex].join("\n")))`
-- `sessionKey`：前端 `randomBytes(32)`，经子进程 env `SUPER_AGENT_LOCAL_SESSION_KEY` 传给内核。
+- 签名代码在 `resources/scheduler/index.cjs` 的 `src/executor/local-auth.ts`（`signRequest`）。
+- `X-SA-Signature = base64url(HMAC-SHA256(sessionKey, ["local-v1", METHOD, pathWithSearch, Date.now()ms, 12Bhex].join("\n")))`
+- 配套头：`X-SA-Sign-Version` / `X-SA-Timestamp` / `X-SA-Nonce` / `X-SA-Signature`。
+- `sessionKey`：主进程 `randomBytes(32)` → `base64url`（**43 字符**），每次启动都变；
+  作为 `SUPER_AGENT_LOCAL_SESSION_KEY` 出现在 `node.exe`（scheduler / im-service）与 Electron 子进程的**环境块**里。
+  → 取法：扫进程内存 `SUPER_AGENT_LOCAL_SESSION_KEY=...`（见 `scripts/get-session-key.py`，实测一次命中）。
+- 备用鉴权：`Authorization: Basic base64(OPENCODE_SERVER_USERNAME:OPENCODE_SERVER_PASSWORD)`（同一份代码里）。
 - `AUTH_STATE = AES-256-GCM(SHA256(sessionKey), {token, deviceId, installId})`。
 - 内存里大量 43 字符 base64url 串是**这些本地签名**，别误当网关签名的密钥。
+
+> 完整的进程/端口/接口/工具结构见 [`kernel-internals.md`](kernel-internals.md)。
 
 ## 7. 工具与环境坑
 
