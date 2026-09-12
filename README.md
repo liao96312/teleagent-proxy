@@ -72,6 +72,12 @@ API Key  : teleagent          （本地不校验，随便填；见 §6）
 Model    : chat-pro | chat-lite | chat-flash
 ```
 
+**额外能力（Go 版）**：
+- 生图：`POST /v1/images/generations`（模型 `image-generation-pro`，尺寸 ≥1920×1920）
+- 视觉：聊天请求里带 `image_url` 即可（自动切 `vision-standard`）
+
+详见 [`docs/image-and-vision.md`](docs/image-and-vision.md)。
+
 ---
 
 ## 1. 原理总览
@@ -172,10 +178,14 @@ scripts\go\build.cmd        # 编译 -> scripts\teleagent-shim.exe
 scripts\start-shim-go.cmd   # 启动（自动取会话密钥）
 ```
 
-Go 版比 Node 版多两件事：
+Go 版比 Node 版多这几件事：
 1. **传输层指纹与内核同源** —— 实测从自己进程内存 dump 出的 wire 与内核请求**逐字段逐顺序一致**；
 2. **`X-Session-Id` 用真实内核会话** —— 每个对话调内核 `POST /session` 建一个真会话并在后续轮次复用，
-   而不是每次随机生成（见 [`docs/wire-fidelity.md`](docs/wire-fidelity.md)）。
+   而不是每次随机生成；
+3. **支持和图相关的能力**：
+   - `POST /v1/images/generations` 生图（/ 图生图）
+   - 带 `image_url` 的聊天请求自动切 `vision-standard` + `tool_call`（视觉）
+   → 见 [`docs/image-and-vision.md`](docs/image-and-vision.md)
 
 完整对比与原理见 [`docs/wire-fidelity.md`](docs/wire-fidelity.md)。
 Node 版保留作为“不想装 Go”时的备选（头已对齐，但会话 ID 为合成、TLS 指纹不同）。
@@ -487,7 +497,8 @@ Go 版启动日志长这样：
 
 | 文件 | 内容 |
 |---|---|
-| [`kernel-internals.md`](docs/kernel-internals.md) | 内核/本地服务内部结构：进程与端️口、三层鉴权、注入的 env、OpenCode API、**自带工具与生图** |
+| [`kernel-internals.md`](docs/kernel-internals.md) | 内核/本地服务内部结构：进程与端️口、三层鉴权、注入的 env、OpenCode API、**自带工具清单** |
+| [`image-and-vision.md`](docs/image-and-vision.md) | **生图 / 图生图 / 视觉**：真机抓到的端点与 body、`image-generation-pro` 与 `vision-standard`、尺寸限制 |
 | [`wire-fidelity.md`](docs/wire-fidelity.md) | 真机抓取的内核 wire 请求、头差异清单、**Go 版如何对齐传输层**、仍无法伪装的部分 |
 | [`signature-algorithms.md`](docs/signature-algorithms.md) | **两套签名算法**（云网关两轮 HMAC + 内核本地 `X-SA-*`）逐字段说明 |
 | [`ban-risk.md`](docs/ban-risk.md) | 封号机理、触发因素、规避建议（含真实案例时间线） |

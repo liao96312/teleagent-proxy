@@ -39,11 +39,15 @@ import (
 )
 
 const (
-	gatewayURL = "https://agent.teleai.com.cn/superCowork/sapi/api/v1/chat/completions"
-	signPath   = "/superCowork/sapi/api/v1/chat/completions"
-	scheme     = "superagent-auth-v1"
-	defaultSK  = "sk-qvp4m6h9g20uM6PgYP7E"
-	b62        = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	gatewayURL     = "https://agent.teleai.com.cn/superCowork/sapi/api/v1/chat/completions"
+	signPath       = "/superCowork/sapi/api/v1/chat/completions"
+	imagesURL      = "https://agent.teleai.com.cn/superCowork/sapi/api/v1/images/generations"
+	imagesSignPath = "/superCowork/sapi/api/v1/images/generations"
+	imageModel     = "image-generation-pro"
+	visionModel    = "vision-standard"
+	scheme         = "superagent-auth-v1"
+	defaultSK      = "sk-qvp4m6h9g20uM6PgYP7E"
+	b62            = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 )
 
 var (
@@ -270,13 +274,7 @@ func convKey(msgs []json.RawMessage) string {
 }
 
 // 为一个对话拿到（或创建）会话 ID：优先真实内核会话，失败则形状对齐的合成 ID
-func sessionFor(body []byte) string {
-	var r struct {
-		Messages []json.RawMessage `json:"messages"`
-	}
-	_ = json.Unmarshal(body, &r)
-	key := convKey(r.Messages)
-
+func sessionForConv(key string) string {
 	sessMu.Lock()
 	defer sessMu.Unlock()
 	if id, ok := sessByConv[key]; ok {
@@ -288,8 +286,54 @@ func sessionFor(body []byte) string {
 		id = kernID("ses")
 	}
 	sessByConv[key] = id
-	log.Printf("[go-shim] new session for conversation %s -> %s (real=%v)", key[:8], id, real)
+	short := key
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	log.Printf("[go-shim] new session for conversation %s -> %s (real=%v)", short, id, real)
 	return id
+}
+
+func messagesOf(body []byte) []json.RawMessage {
+	var r struct {
+		Messages []json.RawMessage `json:"messages"`
+	}
+	_ = json.Unmarshal(body, &r)
+	return r.Messages
+}
+
+// 聊天：按 messages 的第一个 user 消息做对话指纹
+func sessionForChat(body []byte) string {
+	return sessionForConv(convKey(messagesOf(body)))
+}
+
+// 生图：用 prompt 做指纹
+func sessionForImages(body []byte) string {
+	var r struct {
+		Prompt string `json:"prompt"`
+	}
+	_ = json.Unmarshal(body, &r)
+	if r.Prompt == "" {
+		return sessionForConv(sha1hex([]byte("images")))
+	}
+	return sessionForConv(sha1hex([]byte(r.Prompt)))
+}
+
+// 判断聊天请求里是否带了图片（带了就走 tool_call，与内核的 image_understanding 一致）
+func hasImageContent(body []byte) bool {
+	for _, m := range messagesOf(body) {
+		var h struct {
+			Content json.RawMessage `json:"content"`
+		}
+		if json.Unmarshal(m, &h) != nil {
+			continue
+		}
+		c := strings.TrimSpace(string(h.Content))
+		if len(c) > 0 && c[0] == '[' && (strings.Contains(c, "image_url") || strings.Contains(c, "image")) {
+			return true
+		}
+	}
+	return false
 }
 
 func decryptToken() (string, error) {
@@ -410,62 +454,77 @@ func uuidv7() string {
 // ---------- 转发 ----------
 var client = &http.Client{} // 默认 Transport：与内核同样的 Go net/http + crypto/tls
 
-func forward(body []byte, w http.ResponseWriter, streaming bool) {
-	token, err := getToken(false)
+// 网关请求模板：不同端点要的头不完全一样
+//   chat=true  → 聊天那套（带 Authorization/Accept/Cache-Control/Connection + super-agent UA）
+//   chat=false → 工具调用那套（images 端点：不带上面那几个头，UA 用 Go 默认）
+type gwOpts struct {
+	url      string
+	signPath string
+	runUnit  string
+	ua       string // "" = 不设，用 Go 默认 Go-http-client/1.1
+	chat     bool
+}
+
+func gwDo(tok string, o gwOpts, sesID string, body []byte) (*http.Response, error) {
+	ts := time.Now().Unix()
+	nonce := uuid4()
+	sig := sign(tok, "POST", o.signPath, ts, nonce, body)
+	req, err := http.NewRequest("POST", o.url, bytes.NewReader(body))
 	if err != nil {
-		serveErr(w, 500, err.Error())
-		return
+		return nil, err
 	}
-	sesID := sessionFor(body) // 真内核会话（拿不到则退化为合成 ID）
-	doReq := func(tok string, sesID string) (*http.Response, error) {
-		ts := time.Now().Unix()
-		nonce := uuid4()
-		sig := sign(tok, "POST", signPath, ts, nonce, body)
-		req, err := http.NewRequest("POST", gatewayURL, strings.NewReader(string(body)))
-		if err != nil {
-			return nil, err
-		}
-		h := req.Header
+	h := req.Header
+	h.Set("Content-Type", "application/json")
+	if o.ua != "" {
+		h.Set("User-Agent", o.ua)
+	}
+	h.Set("X-App-Version", appVersion)
+	h.Set("X-Message-Id", kernID("msg"))
+	h.Set("X-Request-Id", uuidv7())
+	h.Set("X-Route-Target", "ops-gateway")
+	h.Set("X-Session-Id", sesID)
+	h.Set("X-Superagent-Device-Id", deviceID)
+	h.Set("X-Superagent-Install-Id", installID)
+	h.Set("X-Superagent-Nonce", nonce)
+	h.Set("X-Superagent-Sign-Version", "v1")
+	h.Set("X-Superagent-Signature", sig)
+	h.Set("X-Superagent-Timestamp", strconv.FormatInt(ts, 10))
+	h.Set("X-Teleai-Client-Type", "desktop")
+	h.Set("X-Teleai-Root-Session-Id", sesID)
+	h.Set("X-Teleai-Run-Unit-Type", o.runUnit)
+	h.Set("X-Teleai-Upstream-Request-Id", uuid4())
+	h.Set("X-Token", tok)
+	if o.chat {
 		h.Set("Accept", "text/event-stream")
 		h.Set("Authorization", "Bearer "+sk)
 		h.Set("Cache-Control", "no-cache")
 		h.Set("Connection", "keep-alive")
-		h.Set("Content-Type", "application/json")
-		h.Set("User-Agent", "super-agent/1.0")
-		h.Set("X-App-Version", appVersion)
-		h.Set("X-Message-Id", kernID("msg"))
-		h.Set("X-Request-Id", uuidv7())
-		h.Set("X-Route-Target", "ops-gateway")
-		h.Set("X-Session-Id", sesID)
-		h.Set("X-Superagent-Device-Id", deviceID)
-		h.Set("X-Superagent-Install-Id", installID)
-		h.Set("X-Superagent-Nonce", nonce)
-		h.Set("X-Superagent-Sign-Version", "v1")
-		h.Set("X-Superagent-Signature", sig)
-		h.Set("X-Superagent-Timestamp", strconv.FormatInt(ts, 10))
-		h.Set("X-Teleai-Client-Type", "desktop")
-		h.Set("X-Teleai-Root-Session-Id", sesID)
-		h.Set("X-Teleai-Run-Unit-Type", "agent_loop")
-		h.Set("X-Teleai-Upstream-Request-Id", uuid4())
-		h.Set("X-Token", tok)
-		// Accept-Encoding 交给 Transport 自动加（与内核一致，出现在最后）
-		return client.Do(req)
 	}
-	resp, err := doReq(token, sesID)
+	return client.Do(req)
+}
+
+// 统一发送 + 401/403 自动重取 token 重试一次
+func gwSend(o gwOpts, sesID string, body []byte) (*http.Response, error) {
+	token, err := getToken(false)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := gwDo(token, o, sesID, body)
 	if err == nil && (resp.StatusCode == 401 || resp.StatusCode == 403) {
 		resp.Body.Close()
 		if t2, e2 := getToken(true); e2 == nil {
-			resp, err = doReq(t2, sesID)
+			resp, err = gwDo(t2, o, sesID, body)
 		}
 	}
-	if err != nil {
-		serveErr(w, 502, err.Error())
-		return
-	}
+	return resp, err
+}
+
+// 把上游响应（有可能是 SSE）原样回给客户端
+func pipeBack(w http.ResponseWriter, resp *http.Response, defCT string) {
 	defer resp.Body.Close()
 	ct := resp.Header.Get("Content-Type")
 	if ct == "" {
-		ct = "text/event-stream"
+		ct = defCT
 	}
 	w.Header().Set("Content-Type", ct)
 	w.Header().Set("Cache-Control", "no-cache")
@@ -484,6 +543,86 @@ func forward(body []byte, w http.ResponseWriter, streaming bool) {
 			break
 		}
 	}
+}
+
+// 带图请求要改用视觉模型（内核的 image_understanding 用的是 vision-standard + temperature 0.2）
+func rewriteForVision(body []byte) []byte {
+	in := map[string]any{}
+	if err := json.Unmarshal(body, &in); err != nil {
+		// 解析失败就不改，风险自负
+		if in == nil {
+			return body
+		}
+	}
+	in["model"] = visionModel
+	if _, ok := in["temperature"]; !ok {
+		in["temperature"] = 0.2
+	}
+	out, err := json.Marshal(in)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// 聊天（带图自动切 tool_call + 视觉模型，与内核 image_understanding 一致）
+func forwardChat(body []byte, w http.ResponseWriter) {
+	runUnit := "agent_loop"
+	if hasImageContent(body) {
+		runUnit = "tool_call"
+		body = rewriteForVision(body)
+		log.Printf("[go-shim] 检测到图片输入 -> model=%s, X-Teleai-Run-Unit-Type=tool_call", visionModel)
+	}
+	o := gwOpts{url: gatewayURL, signPath: signPath, runUnit: runUnit, ua: "super-agent/1.0", chat: true}
+	resp, err := gwSend(o, sessionForChat(body), body)
+	if err != nil {
+		serveErr(w, 502, err.Error())
+		return
+	}
+	pipeBack(w, resp, "text/event-stream")
+}
+
+// 生图 / 图生图：转发到平台 /images/generations
+func forwardImages(body []byte, w http.ResponseWriter) {
+	// 先解成 map 保留客户端字段（图生图参考图等），再强制为内核那套固定字段
+	in := map[string]any{}
+	if err := json.Unmarshal(body, &in); err != nil {
+		serveErr(w, 400, "invalid json: "+err.Error())
+		return
+	}
+	if _, ok := in["prompt"]; !ok || in["prompt"] == "" {
+		serveErr(w, 400, "prompt is required")
+		return
+	}
+	in["model"] = imageModel
+	if _, ok := in["response_format"]; !ok {
+		in["response_format"] = "b64_json"
+	}
+	if _, ok := in["seed"]; !ok {
+		in["seed"] = -1
+	}
+	if _, ok := in["sequential_image_generation"]; !ok {
+		in["sequential_image_generation"] = "disabled"
+	}
+	if _, ok := in["size"]; !ok {
+		in["size"] = "2048x2048"
+	}
+	in["stream"] = false
+	if _, ok := in["watermark"]; !ok {
+		in["watermark"] = false
+	}
+	out, err := json.Marshal(in)
+	if err != nil {
+		serveErr(w, 500, err.Error())
+		return
+	}
+	o := gwOpts{url: imagesURL, signPath: imagesSignPath, runUnit: "tool_call", ua: "", chat: false}
+	resp, err := gwSend(o, sessionForImages(out), out)
+	if err != nil {
+		serveErr(w, 502, err.Error())
+		return
+	}
+	pipeBack(w, resp, "application/json")
 }
 
 func uuid4() string {
@@ -528,6 +667,7 @@ func main() {
 		for _, id := range []string{"chat-pro", "chat-lite", "chat-flash"} {
 			models = append(models, map[string]any{"id": id, "object": "model", "owned_by": "teleai"})
 		}
+		models = append(models, map[string]any{"id": imageModel, "object": "model", "owned_by": "teleai"})
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": models})
 	})
@@ -540,7 +680,19 @@ func main() {
 			serveErr(w, 400, err.Error())
 			return
 		}
-		forward(body, w, true)
+		forwardChat(body, w)
+	})
+	// 生图 / 图生图（兼容 OpenAI 图片接口）
+	mux.HandleFunc("/v1/images/generations", func(w http.ResponseWriter, r *http.Request) {
+		if !authOK(w, r) {
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			serveErr(w, 400, err.Error())
+			return
+		}
+		forwardImages(body, w)
 	})
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	log.Printf("[go-shim] listening on http://%s/v1", addr)
