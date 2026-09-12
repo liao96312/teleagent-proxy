@@ -1,5 +1,9 @@
 # TeleAgent 模型反代 —— 本地 OpenAI 兼容接口（两种方案）
 
+![cover](assets/cover.png)
+
+> 封面图由 TeleAgent 自己的生图工具生成（`内部工具/生图`）。
+
 把 **TeleAgent（电信 AI「超级智能体」桌面 App）** 的模型能力，在本机暴露成**标准 OpenAI 兼容接口**（`http://127.0.0.1:8788/v1`），让 pi / Cline / Cursor / 任何 OpenAI 客户端 / 脚本都能调用它的模型（`chat-pro` / `chat-lite` / `chat-flash`）。
 
 本仓库给出**两种实现方案**，请按需选择：
