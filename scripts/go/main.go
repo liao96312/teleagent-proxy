@@ -65,7 +65,8 @@ var (
 	cachedTok  string
 	cachedAt   time.Time
 
-	sessionKey  string   // 内核本地签名密钥（用于创建真会话）
+	sessionKey  string // 内核本地签名密钥（用于创建真会话）
+	realSession = os.Getenv("TA_REAL_SESSION") != "0" // 默认尝试建真内核会话
 	sessMu      sync.Mutex
 	sessByConv  = map[string]string{} // 对话指纹 -> 内核会话ID
 )
@@ -294,6 +295,9 @@ func refreshSessionKeyViaPython() bool {
 }
 
 func createKernelSession() string {
+	if !realSession {
+		return ""
+	}
 	id, code := kernelSessionOnce()
 	if id != "" {
 		return id
@@ -461,7 +465,16 @@ func sign(token, method, path string, ts int64, nonce string, body []byte) strin
 	return hex.EncodeToString(h2.Sum(nil))
 }
 
-// ---------- ID（形状对齐内核） ----------
+// ---------- ID（精确复刻内核算法） ----------
+//
+// 实测（10 个样本完全吻合）：
+//   ses 的 12 位 hex 值 = ~((ms << 12) | 1) & 0xFFFFFFFFFFFF
+//   即 v + (ms<<12) ≡ 2^48 - 2  (mod 2^48)，低 12 位固定 0xFFE
+//   后面跟 14 位 base62 随机串
+//
+// 实测样本：
+//   ms=1789182790685 -> f6c6533e2ffe
+//   ms=1789182796073 -> f6c651ed6ffe
 func randBase62(n int) string {
 	sb := make([]byte, n)
 	for i := range sb {
@@ -475,18 +488,18 @@ func randBase62(n int) string {
 	return string(sb)
 }
 
+// 内核 ID（ses 为精确算法；msg 的形状相同，内部编码未完全逆向）
 func kernID(prefix string) string {
-	inv := ^uint32(time.Now().UnixMilli())
-	rb := make([]byte, 3)
-	rand.Read(rb)
-	hexPart := fmt.Sprintf("%08x%s", inv, hex.EncodeToString(rb))
-	if len(hexPart) > 12 {
-		hexPart = hexPart[:12]
+	return kernIDAt(prefix, uint64(time.Now().UnixMilli()))
+}
+
+func kernIDAt(prefix string, ms uint64) string {
+	ctr := uint64(1)
+	if prefix == "msg" {
+		ctr = 0xFFE
 	}
-	for len(hexPart) < 12 {
-		hexPart += "0"
-	}
-	return prefix + "_" + hexPart + randBase62(14)
+	v := (^(ms<<12 | ctr)) & 0xFFFFFFFFFFFF
+	return fmt.Sprintf("%s_%012x%s", prefix, v, randBase62(14))
 }
 
 func uuidv7() string {
@@ -756,10 +769,10 @@ func main() {
 	} else {
 		log.Printf("[go-shim] apiKey 校验: 关（本地任意 key 均可）")
 	}
-	if sessionKey != "" {
-		log.Printf("[go-shim] 内核会话支持: 开（session.key 已加载，X-Session-Id 为真实会话）")
+	if sessionKey != "" && realSession {
+		log.Printf("[go-shim] 内核会话: 开（会向内核建真会话；App 关了则自动退化为精确格式的本地 ID）")
 	} else {
-		log.Printf("[go-shim] 内核会话支持: 关（未见 session.key，X-Session-Id 用合成 ID；如需真会话请跑 get-session-key.py）")
+		log.Printf("[go-shim] 内核会话: 关（直接用精确复刻的本地 ID，不依赖 App）")
 	}
 	if _, err := getToken(false); err != nil {
 		log.Printf("[go-shim] token load failed: %v", err)
