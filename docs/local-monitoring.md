@@ -128,7 +128,40 @@ app-auth/install-receipt.json {"generation":"fresh:{329792CB-4893-431B-A8E1-6E39
 | 用量 | token 计量 | ✅ 上报 |
 | 进程/窗口/磁盘序列号 | 内核有 API 能力 | 未观测到主动上报 |
 
-## 10. 对反代的直接含义
+
+补充：`[SysInfo] system` —— **主板/整机信息**
+```
+[SysInfo] system {
+  manufacturer: 'Gigabyte Technology Co., Ltd.',
+  model:        'H610M H V2 DDR4',
+  version:      '-CF',
+  serial:       'Default string',
+  uuid:         '03560274-043c-05ad-1106-ca0700080009',   ← 主板 UUID
+  sku:          'Default string',
+  virtual:      false
+}
+```
+四项 `[SysInfo]`：`basicSystemInfo`(含 MAC) / `osInfo`(含 Windows 序列号) /
+`system`(含主板厂商+型号+UUID) / `systemSupport`。
+
+## 11. 指纹可伪造性（实测）
+
+**实测结论：`deviceId` / `installId` 不是硬件派生，是 `app-auth/device-meta.json` 里的存盘值。**
+
+```
+改 file -> {"deviceId":"aabbccddeeff","installId":"11111111-..."}
+重启 App -> 文件未被改回；扫内核内存：aabbccddeeff ×4，旧值 74563cad11ca ×0
+```
+
+工具：`scripts/randomize-fingerprint.py`（自动备份，支持 `--show/--restore/--rotate-generation`）。
+
+| 项 | 可伪造 | 是否上传 |
+|---|---|---|
+| deviceId / installId | ✅ 随便编 | ✅ 每个请求头 |
+| 主板 UUID / MAC / Windows 序列号 / hostname | ❌ | 未观测到上传；启动采集后不留内存（扫 5 个进程 0 命中） |
+| install generation | ✅ 可轮换 | ✅，但**会强制重新登录** |
+
+## 12. 对反代的直接含义
 
 1. **deviceId / installId / MAC / Windows 序列号** 都进指纹 → 多账号共用一台机器时，
    平台看到的设备指纹是**同一个**，这是「多账号」关联的最直接线索。
