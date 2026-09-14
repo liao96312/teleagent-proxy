@@ -543,6 +543,7 @@ Go 版启动日志长这样：
 | `scripts/ta-image.py` | 一键生图（提示词 → 文件），供 pi 的 bash 工具调用 |
 | `scripts/ta-vision.py` | 一键看图（图片 + 问题 → 回答） |
 | [`image-and-vision.md`](docs/image-and-vision.md) | 生图/视觉：端点、模型名、尺寸限制、**与内核工具的区别** |
+| [`auto-ban-risk-points.md`](docs/auto-ban-risk-points.md) | **自动化封禁风险点清单**：已证实触发、平台可检测项、风险排序、换指纹正确姿势 |
 | [`local-monitoring.md`](docs/local-monitoring.md) | **TeleAgent 在本机采集/监控了什么**：设备指纹、反调试、内容审核、工具审查、用量上报 |
 | [`ban-analysis-2.md`](docs/ban-analysis-2.md) | **第二次封号分析**：工具调用缺 review、模型消耗=0、标题写死 pi 等硬指纹与对策 |
 | [`wire-fidelity.md`](docs/wire-fidelity.md) | 真机抓取的内核 wire 请求、头差异清单、**Go 版如何对齐传输层**、仍无法伪装的部分 |
