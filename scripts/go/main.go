@@ -46,6 +46,25 @@ const (
 	imagesSignPath = "/superCowork/sapi/api/v1/images/generations"
 	imageModel     = "image-generation-pro"
 	visionModel    = "vision-standard"
+	// 内核标题生成用的 system prompt（从内核二进制里提取，OpenCode 的 title generator）
+	titlePrompt = `You are a title generator. You output ONLY a thread title. Nothing else.
+<task>
+Generate a brief title that would help the user find this conversation later.
+Your output must be:
+- A single line
+- <= 50 characters
+- No explanations
+</task>
+<rules>
+- you MUST use the same language as the user message you are summarizing
+- Title must be grammatically correct and read naturally - no word salad
+- Never include tool names in the title
+- Focus on the main topic or question the user needs to retrieve
+- Keep exact: technical terms, numbers, filenames, HTTP codes
+- NEVER respond to questions, just generate a title for the conversation
+- Always output something meaningful, even if the input is minimal.
+</rules>`
+	titleModel = "chat-lite" // 内核 small_model = NewApi/chat-lite
 	scheme         = "superagent-auth-v1"
 	defaultSK      = "sk-qvp4m6h9g20uM6PgYP7E"
 	b62            = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -66,9 +85,13 @@ var (
 	cachedAt   time.Time
 
 	sessionKey  string // 内核本地签名密钥（仅在 TA_REAL_SESSION=1 时需要）
-	// 默认【关】：直接用精确复刻的本地 ID，不依赖 App、不需要 session.key
-	// 设 TA_REAL_SESSION=1 则改为向内核建真会话（需要 App 运行）
-	realSession = os.Getenv("TA_REAL_SESSION") == "1"
+	// 默认【开】：向内核建真会话（带小模型生成的标题），对齐正常对话；
+	// 设 TA_REAL_SESSION=0 则纯本地生成精确格式 ID（不依赖 App，但没有标题记录）
+	realSession = os.Getenv("TA_REAL_SESSION") != "0"
+	// 工具型能力（生图/视觉）默认关闭：它们在平台侧留下两个硬指纹——
+	//   ① 模型消耗=0（生图不经模型轮次）
+	//   ② 无 security/instruction/review 记录（内核对每个工具调用都会先上报审查）
+	enableTools = os.Getenv("TA_ENABLE_TOOLS") == "1"
 	sessMu      sync.Mutex
 	sessByConv  = map[string]string{} // 对话指纹 -> 内核会话ID
 )
@@ -229,11 +252,15 @@ func localSignHeaders(method, pathWithQuery string) map[string]string {
 }
 
 // 在本地内核里真建一个会话，返回它的 id（失败返回 ""）
-func kernelSessionOnce() (string, int) {
+func kernelSessionOnce(title string) (string, int) {
 	if sessionKey == "" {
 		return "", 0
 	}
-	body := `{"title":"pi"}`
+	if title == "" {
+		title = "新对话"
+	}
+	tb, _ := json.Marshal(map[string]string{"title": title})
+	body := string(tb)
 	req, err := http.NewRequest("POST", kernelURL+"/session", strings.NewReader(body))
 	if err != nil {
 		return "", 0
@@ -296,17 +323,17 @@ func refreshSessionKeyViaPython() bool {
 	return false
 }
 
-func createKernelSession() string {
+func createKernelSession(title string) string {
 	if !realSession {
 		return ""
 	}
-	id, code := kernelSessionOnce()
+	id, code := kernelSessionOnce(title)
 	if id != "" {
 		return id
 	}
 	if code == 401 || code == 403 {
 		if refreshSessionKeyViaPython() {
-			if id2, _ := kernelSessionOnce(); id2 != "" {
+			if id2, _ := kernelSessionOnce(title); id2 != "" {
 				return id2
 			}
 		}
@@ -334,13 +361,15 @@ func convKey(msgs []json.RawMessage) string {
 }
 
 // 为一个对话拿到（或创建）会话 ID：优先真实内核会话，失败则形状对齐的合成 ID
-func sessionForConv(key string) string {
+func sessionForConv(key, firstUserText string) string {
 	sessMu.Lock()
 	defer sessMu.Unlock()
 	if id, ok := sessByConv[key]; ok {
 		return id
 	}
-	id := createKernelSession()
+	// 先按内核的方式建会话（标题给个占位），随后异步用小模型生成标题再 PATCH，
+	// 这样 X-Session-Id 与标题生成请求用的都是同一个会话。
+	id := createKernelSession("新对话")
 	real := id != ""
 	if !real {
 		id = kernID("ses")
@@ -351,7 +380,48 @@ func sessionForConv(key string) string {
 		short = short[:8]
 	}
 	log.Printf("[go-shim] new session for conversation %s -> %s (real=%v)", short, id, real)
+	if real && firstUserText != "" {
+		go func(sid, txt string) {
+			if t := genTitle(txt, sid); t != "" {
+				patchKernelSessionTitle(sid, t)
+				log.Printf("[go-shim] 标题已生成: %s -> %q", sid, t)
+			}
+		}(id, firstUserText)
+	}
 	return id
+}
+
+// 取第一条 user 消息的纯文本（给标题生成用）
+func firstUserText(msgs []json.RawMessage) string {
+	for _, m := range msgs {
+		var h struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}
+		if json.Unmarshal(m, &h) != nil || h.Role != "user" {
+			continue
+		}
+		var s string
+		if json.Unmarshal(h.Content, &s) == nil {
+			return s
+		}
+		var arr []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(h.Content, &arr) == nil {
+			var sb strings.Builder
+			for _, p := range arr {
+				if p.Type == "text" {
+					sb.WriteString(p.Text)
+				}
+			}
+			if sb.Len() > 0 {
+				return sb.String()
+			}
+		}
+	}
+	return ""
 }
 
 func messagesOf(body []byte) []json.RawMessage {
@@ -364,7 +434,8 @@ func messagesOf(body []byte) []json.RawMessage {
 
 // 聊天：按 messages 的第一个 user 消息做对话指纹
 func sessionForChat(body []byte) string {
-	return sessionForConv(convKey(messagesOf(body)))
+	msgs := messagesOf(body)
+	return sessionForConv(convKey(msgs), firstUserText(msgs))
 }
 
 // 生图：用 prompt 做指纹
@@ -374,9 +445,9 @@ func sessionForImages(body []byte) string {
 	}
 	_ = json.Unmarshal(body, &r)
 	if r.Prompt == "" {
-		return sessionForConv(sha1hex([]byte("images")))
+		return sessionForConv(sha1hex([]byte("images")), "")
 	}
-	return sessionForConv(sha1hex([]byte(r.Prompt)))
+	return sessionForConv(sha1hex([]byte(r.Prompt)), r.Prompt)
 }
 
 // 判断聊天请求里是否带了图片（带了就走 tool_call，与内核的 image_understanding 一致）
@@ -488,6 +559,81 @@ func randBase62(n int) string {
 		sb[i] = b62[v.Int64()]
 	}
 	return string(sb)
+}
+// 用内核小模型（chat-lite）生成标题，模拟内核标题生成行为，
+// 避免出现写死的 "pi" 这种一看就不是正常对话的标题。
+// 失败返回 ""（调用方会用兜底标题）。
+func genTitle(firstUserText, sessionID string) string {
+	if firstUserText == "" {
+		return ""
+	}
+	if len([]rune(firstUserText)) > 4000 {
+		firstUserText = string([]rune(firstUserText)[:4000])
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"model": titleModel,
+		"messages": []map[string]any{
+			{"role": "system", "content": titlePrompt},
+			{"role": "user", "content": "Generate a title for this conversation:\n\n" + firstUserText},
+		},
+		"max_tokens": 64,
+		"stream":     false,
+	})
+	if sessionID == "" {
+		sessionID = kernID("ses")
+	}
+	o := gwOpts{url: gatewayURL, signPath: signPath, runUnit: "agent_loop", ua: "super-agent/1.0", chat: true}
+	resp, err := gwSend(o, sessionID, payload)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return ""
+	}
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(b, &out) != nil || len(out.Choices) == 0 {
+		return ""
+	}
+	t := strings.TrimSpace(out.Choices[0].Message.Content)
+	if i := strings.IndexByte(t, '\n'); i > 0 {
+		t = strings.TrimSpace(t[:i])
+	}
+	t = strings.Trim(t, "\"'` ")
+	if len([]rune(t)) > 60 {
+		t = string([]rune(t)[:60])
+	}
+	return t
+}
+
+// 把标题写回内核会话（PATCH /session/:id）
+func patchKernelSessionTitle(id, title string) {
+	if sessionKey == "" || id == "" || title == "" {
+		return
+	}
+	tb, _ := json.Marshal(map[string]string{"title": title})
+	path := "/session/" + id
+	req, err := http.NewRequest("PATCH", kernelURL+path, strings.NewReader(string(tb)))
+	if err != nil {
+		return
+	}
+	for k, v := range localSignHeaders("PATCH", path) {
+		req.Header.Set(k, v)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	cl := &http.Client{Timeout: 10 * time.Second}
+	resp, err := cl.Do(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
 }
 
 // 内核 ID（ses 为精确算法；msg 的形状相同，内部编码未完全逆向）
@@ -638,6 +784,12 @@ func rewriteForVision(body []byte) []byte {
 func forwardChat(body []byte, w http.ResponseWriter) {
 	runUnit := "agent_loop"
 	if hasImageContent(body) {
+		if !enableTools {
+			serveErr(w, 403, "视觉（图片输入）已暂时关闭：该能力对平台表现为 tool_call，"+
+				"但缺少内核的 security/instruction/review 记录，已被用于风控识别。"+
+				"确需使用请设 TA_ENABLE_TOOLS=1（自担风险）。")
+			return
+		}
 		runUnit = "tool_call"
 		body = rewriteForVision(body)
 		log.Printf("[go-shim] 检测到图片输入 -> model=%s, X-Teleai-Run-Unit-Type=tool_call", visionModel)
@@ -653,6 +805,12 @@ func forwardChat(body []byte, w http.ResponseWriter) {
 
 // 生图 / 图生图：转发到平台 /images/generations
 func forwardImages(body []byte, w http.ResponseWriter) {
+	if !enableTools {
+		serveErr(w, 403, "生图已暂时关闭：直连 /images/generations 会在平台留下"+
+			"「模型消耗=0 + 无 security/instruction/review」的记录，是明显的非 agent 调用。"+
+			"确需使用请设 TA_ENABLE_TOOLS=1（自担风险）。")
+		return
+	}
 	// 先解成 map 保留客户端字段（图生图参考图等），再强制为内核那套固定字段
 	in := map[string]any{}
 	if err := json.Unmarshal(body, &in); err != nil {
@@ -769,6 +927,7 @@ func main() {
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	log.Printf("[go-shim] listening on http://%s/v1", addr)
 	log.Printf("[go-shim] account=%s deviceId=%s installId=%s", account, deviceID, installID)
+	log.Printf("[go-shim] 生图/视觉（工具型能力）: %s", map[bool]string{true: "开（TA_ENABLE_TOOLS=1，有风控风险）", false: "关（默认，纯聊天不受影响）"}[enableTools])
 	if apiKey != "" {
 		log.Printf("[go-shim] apiKey 校验: 开（TA_API_KEY）")
 	} else {

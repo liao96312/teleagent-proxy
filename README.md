@@ -543,6 +543,7 @@ Go 版启动日志长这样：
 | `scripts/ta-image.py` | 一键生图（提示词 → 文件），供 pi 的 bash 工具调用 |
 | `scripts/ta-vision.py` | 一键看图（图片 + 问题 → 回答） |
 | [`image-and-vision.md`](docs/image-and-vision.md) | 生图/视觉：端点、模型名、尺寸限制、**与内核工具的区别** |
+| [`ban-analysis-2.md`](docs/ban-analysis-2.md) | **第二次封号分析**：工具调用缺 review、模型消耗=0、标题写死 pi 等硬指纹与对策 |
 | [`wire-fidelity.md`](docs/wire-fidelity.md) | 真机抓取的内核 wire 请求、头差异清单、**Go 版如何对齐传输层**、仍无法伪装的部分 |
 | [`signature-algorithms.md`](docs/signature-algorithms.md) | **两套签名算法**（云网关两轮 HMAC + 内核本地 `X-SA-*`）逐字段说明 |
 | [`ban-risk.md`](docs/ban-risk.md) | 封号机理、触发因素、规避建议（含真实案例时间线） |
