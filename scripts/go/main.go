@@ -145,12 +145,18 @@ func findAccount() string {
 		}
 	}
 	if len(cs) == 0 {
+		// 都没有 token.json（例如未登录）时，退化为取**名字最新**的那个账号目录，
+		// 而不是随便取第一个（第一个往往是早已废弃的旧账号）。
+		best := ""
 		for _, e := range ents {
-			if e.IsDir() && strings.HasPrefix(e.Name(), "v1_public_") {
-				return e.Name()
+			if !e.IsDir() || !strings.HasPrefix(e.Name(), "v1_public_") {
+				continue
+			}
+			if e.Name() > best {
+				best = e.Name()
 			}
 		}
-		return ""
+		return best
 	}
 	sort.Slice(cs, func(i, j int) bool { return cs[i].mt > cs[j].mt })
 	return cs[0].name
@@ -636,17 +642,22 @@ func patchKernelSessionTitle(id, title string) {
 	resp.Body.Close()
 }
 
-// 内核 ID（ses 为精确算法；msg 的形状相同，内部编码未完全逆向）
+// 内核 ID —— ses 与 msg 用同一套公式，只是方向相反（已实测验证）
 func kernID(prefix string) string {
 	return kernIDAt(prefix, uint64(time.Now().UnixMilli()))
 }
 
 func kernIDAt(prefix string, ms uint64) string {
-	ctr := uint64(1)
-	if prefix == "msg" {
-		ctr = 0xFFE
+	var v uint64
+	if prefix == "ses" {
+		// 会话：取反，随时间**递减**。实测 10 样本精确命中。
+		v = (^(ms << 12 | 1)) & 0xFFFFFFFFFFFF
+	} else {
+		// 消息：不取反，随时间**递增**，低 12 位固定 0x001。
+		// 实测配对样本：ses=f6ca966ecffe 对的 msg=0935699b5001，
+		// 反推 ms 相差 162ms（先建会话、再建消息的时序）
+		v = ((ms << 12) | 1) & 0xFFFFFFFFFFFF
 	}
-	v := (^(ms<<12 | ctr)) & 0xFFFFFFFFFFFF
 	return fmt.Sprintf("%s_%012x%s", prefix, v, randBase62(14))
 }
 
