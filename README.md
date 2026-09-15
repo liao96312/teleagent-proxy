@@ -1,5 +1,19 @@
 # TeleAgent 模型反代 —— 本地 OpenAI 兼容接口（两种方案）
 
+![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)
+![Go](https://img.shields.io/badge/Go-1.26.5-00ADD8?logo=go&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-shim-5FA04E?logo=nodedotjs&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3_stdlib-3776AB?logo=python&logoColor=white)
+![API](https://img.shields.io/badge/API-OpenAI_compatible-412991?logo=openai&logoColor=white)
+![Auth](https://img.shields.io/badge/Auth-HMAC--SHA256-orange)
+![Endpoint](https://img.shields.io/badge/127.0.0.1-8788%2Fv1-informational)
+![License](https://img.shields.io/badge/License-Research_Only-red)
+
+![方案 A](https://img.shields.io/badge/方案_A-直连云网关-blue)
+![方案 B](https://img.shields.io/badge/方案_B-App_本地_server-green)
+![pi](https://img.shields.io/badge/pi-内核子代理扩展-7C3AED)
+![MCP](https://img.shields.io/badge/MCP-playwright_supported-000000)
+
 ![cover](assets/cover.png)
 
 > 封面图由 TeleAgent 自己的生图工具生成（`内部工具/生图`）。
