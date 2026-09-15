@@ -35,7 +35,7 @@
 - [7. 二次使用 / 一键恢复](#7-二次使用--一键恢复)
 - [8. 迁移到别人的环境](#8-迁移到别人的环境)
 - [9. 排错](#9-排错)
-- [10. 文档索引](#10-文档索引)
+- [10. 文档与文件索引](#10-文档与文件索引)
 
 ---
 
@@ -272,8 +272,11 @@ TeleAgent 进程内跑着一个**本地 HTTP server**（Go 写的 `hertz` 框架
 |---|---|---|
 | GET | `/session` | 列出会话 |
 | POST | `/session` | 建会话，body `{"title":"..."}`，返回 `{id}` |
-| POST | `/session/:id/message` | 发消息。body `{model:{providerID,modelID}, parts:[{type:"text",text:"..."}], system?}`，返回 `{data:{info,parts}}` |
+| POST | `/session/:id/message` | 发消息。body `{model:{providerID,modelID}, parts:[{type:"text",text:"..."}], system?, mode?}`，返回 `{data:{info,parts}}`。**同步阻塞**，整个 agent 循环跑完才返回 |
 | GET | `/session/:id/message` | 取该会话消息列表 |
+| POST | `/session/:id/abort` | **终止会话**。断线/超时后必须主动调，否则它会变孤儿继续跑 |
+| GET | `/permission` | 列出待批权限请求 |
+| POST | `/permission/:id/reply` | `{"reply":"always"}` 放行 |
 | GET | `/provider` | 列 provider（可见 `NewApi` → 网关 baseURL + apiKey） |
 | GET | `/config` | 内核配置（`agent` / `mcp` / `provider`） |
 | GET | `/openapi` | 路由摘要 |
@@ -389,6 +392,66 @@ pi 没有内置生图工具，所以让它调本仓库提供的脚本：
 **⚠️ 重要区别**：这是**反代出来的裸模型能力**，不是复用内核的 `ImageGen` / `image_understanding` 工具。
 所以内核工具帮你做的那些事（落盘命名、图生图编排、工具安全审查、多图重试）**都不包含**，
 需要由 pi（或你）自己做。详见 [`docs/image-and-vision.md`](docs/image-and-vision.md)。
+
+### 4.5 ★ 推荐用法：内核子代理（`teleagent` 工具）
+
+上面的 §4.4 是「把内核当裸模型用」。但方案 B 真正的强项是另一种用法：
+**把执行整体外包给内核自带的 agent loop，pi 只做规划与验收。**
+
+```
+pi（规划 / 验收 / 编排）
+   │  teleagent 工具：一段自包含任务描述
+   ▼
+scripts/pi/teleagent-subagent.ts
+   │  X-SA-* 本地签名 → POST /session/:id/message（同步阻塞）
+   ▼
+内核 127.0.0.1:4397 → App → 云网关
+```
+
+为什么值得：内核自带 PowerShell、读写文件、联网搜索、`ImageGen`、`image_understanding`、MCP——
+这些能力用 §4.4 的裸模型路径**全部拿不到**，而用子代理就全都有了。
+
+**安装**：
+
+```bash
+mkdir -p ~/.pi/agent/extensions
+cp scripts/pi/teleagent-subagent.ts ~/.pi/agent/extensions/
+# 确认 TeleAgent 已登录并取到本地会话密钥
+python scripts/get-session-key.py
+# 然后在 pi 里 /reload
+```
+
+**调用**（N 件独立的事用 `tasks` 扇出，内核会并发跑多个会话）：
+
+```jsonc
+// 单个任务
+teleagent({ task: "...自包含任务...", timeoutSec: 900 })
+
+// 扇出：不要发 N 次调用，也不要塞进一个 task 串行做
+teleagent({
+  tasks: [
+    "生成 A 房间效果图，prompt 逐字照抄：...。只回报 RAW=<绝对路径>",
+    "生成 B 房间效果图，prompt 逐字照抄：...。只回报 RAW=<绝对路径>"
+  ],
+  timeoutSec: 900,
+  concurrency: 8
+})
+```
+
+**实测性能**（详见 [`docs/pi-subagent.md`](docs/pi-subagent.md)）：
+
+| 场景 | 耗时 |
+|---|---|
+| 9 张 3840×2160 生图，单用途任务扇出 | **~91 s**（串行 ≥10 min） |
+| 宏压测 48 并发会话 | 9.46 s（串行应为 382 s），无排队 |
+
+**两个必须知道的坑**：
+
+1. **不要用 Node 内置 `fetch`**：内核 `message` 接口是同步阻塞的，undici 默认 `headersTimeout=300s`，
+   任何 >5 min 的任务必抛 `fetch failed`。扩展里改用 `node:http` 裸请求绕过。
+2. **超时 ≠ 失败，且内核不会自己停**：pi 报超时后，内核会话仍在跑（实测一个孤儿跑了 **44 分钟**，
+   持续生图并反复覆盖产物文件）。扩展里的三条防线是：放弃时 `POST /session/:id/abort`、
+   `signal.aborted` 时 abort、进程退出时 abort —— 另提供 `/ta-kill` 事后兜底。
 
 ---
 
@@ -550,6 +613,7 @@ Go 版启动日志长这样：
 | [`signature-algorithms.md`](docs/signature-algorithms.md) | **两套签名算法**（云网关两轮 HMAC + 内核本地 `X-SA-*`）逐字段说明 |
 | [`ban-risk.md`](docs/ban-risk.md) | 封号机理、触发因素、规避建议（含真实案例时间线） |
 | [`recon-notes.md`](docs/recon-notes.md) | 逆向过程：二进制地址、内存扫描方法、错误码表 |
+| [`pi-subagent.md`](docs/pi-subagent.md) | **pi 内核子代理**：设计、四个「慢」的根因、并发压测数据、**孤儿会话治理**、验收职责划分 |
 
 **方案 A（直连网关，支持自定义 tools）—— ★ 推荐用 Go 版**
 
@@ -572,6 +636,7 @@ Go 版启动日志长这样：
 | `scripts/get-session-key.py` | 从 TeleAgent 进程内存取 `SUPER_AGENT_LOCAL_SESSION_KEY` → `session.key` |
 | `scripts/kernel-probe.js` | 带本地签名探测内核接口（调试用） |
 | `scripts/start-local-shim.cmd` | 启动方案 B（先取密钥再起 shim） |
+| `scripts/pi/teleagent-subagent.ts` | **pi 内核子代理扩展**（方案 B 推荐用法：并发扇出 + 防孤儿 + 自动放行），见 [`docs/pi-subagent.md`](docs/pi-subagent.md) |
 
 **其他**：`assets/cover.png`（封面，由 TeleAgent 生图工具生成）、`LICENSE`。
 
