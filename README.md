@@ -342,6 +342,10 @@ TeleAgent 进程内跑着一个**本地 HTTP server**（Go 写的 `hertz` 框架
 
 三者都开启 `tool_stream`。另外还存在 `chat-nano`（未在内核默认列表启用）。
 
+> 💡 **上表的「最大输出」可以改**：65,536 → 131,072 已实测可行，但要同时过掉应用自身的**三层防篡改**（逐文件 integrity / asar 头部哈希 vs exe 内嵌值 / exe 签名自校验），做法与验收方法见 [`docs/asar-integrity-and-limit-mod.md`](docs/asar-integrity-and-limit-mod.md)。
+> ⚠️ 改完**应用自动更新会顶掉**；若只改了 asar（或更新后 exe 被换回厂商签名版），L2 会导致**启动失败**——更新前先回滚。
+> 🧭 另外：`chat-pro` / `chat-flash` 只是网关别名，**客户端拿不到真实模型名**（网关响应把别名原样回显），调查过程见同一篇文档 §6。
+
 ### 4.1 配 provider
 **`models.json`**（在已有 `providers` 里**追加** `teleagent`，勿删原有）：
 ```json
@@ -628,6 +632,7 @@ Go 版启动日志长这样：
 | [`ban-risk.md`](docs/ban-risk.md) | 封号机理、触发因素、规避建议（含真实案例时间线） |
 | [`recon-notes.md`](docs/recon-notes.md) | 逆向过程：二进制地址、内存扫描方法、错误码表 |
 | [`pi-subagent.md`](docs/pi-subagent.md) | **pi 内核子代理**：设计、四个「慢」的根因、并发压测数据、**孤儿会话治理**、验收职责划分 |
+| [`asar-integrity-and-limit-mod.md`](docs/asar-integrity-and-limit-mod.md) | **三层防篡改与输出上限改造（65536→131072）**：bytenode 字节码定位、asar 头部/exe 哈希同步、签名自校验的「非 Valid 即放行」分支、进程内存验收方法、**别名 vs 真实模型名**调查 |
 
 **方案 A（直连网关，支持自定义 tools）—— ★ 推荐用 Go 版**
 
