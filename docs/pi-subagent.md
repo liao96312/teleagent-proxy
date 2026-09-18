@@ -236,7 +236,23 @@ teleagent({
 
 ---
 
-## 8. 安装
+## 8. 云端敏感截断的自动重跑（2026-09-18 新增）
+
+网关判定内容敏感时，会在 SSE 末帧回 `finish_reason:"sensitive"`，**正文一个字节都不下发**，
+内核据此中断回合，pi 侧看到的是「空结果 + `finish: error` + `token 0/0`」。
+
+处置：`runTask` 外层包一层重跑 —— 判据「没正文 + 不是正常收尾」命中就**新建会话**再来一次，
+默认最多额外 2 次（`TA_SENSITIVE_RETRY` 可调 0~3）。
+
+为什么必须新建会话：网关请求头带 `x-superagent-nonce/-signature`（HMAC 一次性签名），
+**本地重放同一个请求会直接 401**，换流重发这条路是死路。新建会话时内核会重新签名，
+等于让模型换一次采样（同一问题实测命中率约一半，两次约 87% —— 是概率不是保证）。
+
+完整取证与三次失败方案见 [`sensitive-truncation-and-retry.md`](sensitive-truncation-and-retry.md)。
+
+---
+
+## 9. 安装
 
 ```bash
 # 1. 拷扩展
@@ -261,13 +277,14 @@ python scripts/get-session-key.py
 | `TA_REPO` | `D:\tele proxy\teleagent-proxy` | 仓库根 |
 | `TA_PERMISSION_MODE` | `yolo` | 内核权限模式 |
 | `TA_ORPHAN_AGE_MS` | `600000` | 孤儿判定阈值（10 分钟无动静） |
+| `TA_SENSITIVE_RETRY` | `2` | 云端敏感截断时额外重跑次数（0~3） |
 
 > `session.key` 每次 App 重启都会变。扩展会在 401 时自动重取（调 `get-session-key.py` 扫内存），
 > 若取不到会明确报错。
 
 ---
 
-## 9. 已知限制 / TODO
+## 10. 已知限制 / TODO
 
 - **`recoverFromHistory()` 的「稳定判定」是启发式的**：靠连续两轮轮询文本不变来判定结束，
   极端情况下可能在模型长思考期间误判为已完成。更稳的做法是走 `GET /global/event` SSE 监听
@@ -278,3 +295,5 @@ python scripts/get-session-key.py
   放开前请评估封号风险（见 [`auto-ban-risk-points.md`](auto-ban-risk-points.md)）。
 - 内核侧 `POST /session/:id/message` 的阻塞语义决定了「一个任务 = 一条长连接」，
   暂时无法做流式进度回传（只能靠轮询历史模拟）。
+- **敏感重跑是「换采样」，不是「解锁」**：它没有绕过云端审查，只是这次采样没被判敏感；
+  始终失败时会把空结果如实报出，不会假装成功。
