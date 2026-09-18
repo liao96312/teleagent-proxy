@@ -43,18 +43,6 @@ const MAX_RESULT_CHARS = 30000;
 // 孤儿判定：内核里超过这个时长没动静、且不属于本进程在等的会话，视为遗留孤儿
 const ORPHAN_AGE_MS = Number(process.env.TA_ORPHAN_AGE_MS ?? 10 * 60 * 1000);
 
-// 云端敏感截断的自动重跑次数。
-//
-// 背景（2026-09-18 实测）：云网关判定内容敏感时会单独补一帧
-// `finish_reason="sensitive"`（正文零字节），内核据此中断这一回合，pi 这边看到的是
-// 「finish: error / 内核未返回文本输出」。同一问题重试往往就过了（实测命中率约一半），
-// 所以这里换一次采样重跑，而不是把失败摊给用户。
-//
-// 为什么只能在 pi 这层重跑、不能在 sink 里换流重发：
-//   请求头带 x-superagent-nonce / -signature（HMAC 一次性签名，密钥不在我们手里），
-//   原样重放会被网关直接 401。新建会话重跑才是干净的路。
-const SENSITIVE_RETRY_EXTRA = Math.min(Math.max(Number(process.env.TA_SENSITIVE_RETRY ?? 2), 0), 3);
-
 const MODEL_IDS = ["chat-pro", "chat-lite", "chat-flash"] as const;
 type ModelId = (typeof MODEL_IDS)[number];
 
@@ -466,7 +454,7 @@ async function fetchToolTrace(sessionId: string): Promise<ToolTrace[]> {
 	}
 }
 
-async function runTaskOnce(
+async function runTask(
 	task: string,
 	model: ModelId,
 	timeoutSec: number,
@@ -549,42 +537,6 @@ async function runTaskOnce(
 		finish: String(info.finish ?? "stop"),
 		tokens: info.tokens ?? {},
 	};
-}
-
-/** 是不是「云端敏感截断 / 内核什么都没跑出来」的形态：没正文、且不是正常收尾 */
-function looksTruncated(res: RunResult): boolean {
-	if ((res.text || "").trim()) return false;
-	const tk: any = res.tokens || {};
-	return res.finish === "error" || Number(tk.total ?? 0) === 0;
-}
-
-/**
- * 带敏感重跑的 runTask：空结果（大概率被云网关截断）就新建会话再来一次。
- * 每次重跑都是全新会话 → 全新的 nonce/签名，不受网关一次性签名影响。
- */
-async function runTask(
-	task: string,
-	model: ModelId,
-	timeoutSec: number,
-	signal: AbortSignal | undefined,
-	onUpdate: ((u: { content: { type: "text"; text: string }[] }) => void) | undefined,
-): Promise<RunResult> {
-	let last: RunResult | undefined;
-	for (let attempt = 0; attempt <= SENSITIVE_RETRY_EXTRA; attempt++) {
-		if (signal?.aborted) break;
-		last = await runTaskOnce(task, model, timeoutSec, signal, onUpdate);
-		if (!looksTruncated(last)) return last;
-		if (attempt === SENSITIVE_RETRY_EXTRA) break;
-		onUpdate?.({
-			content: [
-				{
-					type: "text",
-					text: `内核返回空结果（finish=${last.finish}），大概率是云端敏感截断，换一次采样重跑（第 ${attempt + 2} 次）…`,
-				},
-			],
-		});
-	}
-	return last!;
 }
 
 function formatResult(res: RunResult): string {

@@ -611,7 +611,6 @@ Go 版启动日志长这样：
 | pi 里看不到 teleagent | `models.json` JSON 写错，或没在 `auth.json` 加 `teleagent`。改完重开 `/model`。 |
 | pi 能选但连不上 | shim 没在跑。双击 `start-shim.cmd`。 |
 | 工具调用不生效 | 网关原生支持 tools（已实测）；确认请求确实带了 `tools`。 |
-| 子代理返回空结果 / `finish: error` / `token 0/0` | **云端敏感截断**：网关在 SSE 末帧回 `finish_reason="sensitive"`（正文零字节）。本地无法屏蔽（重放会 401），只能换采样重做。见 [`docs/sensitive-truncation-and-retry.md`](docs/sensitive-truncation-and-retry.md)。 |
 
 ---
 
@@ -634,7 +633,6 @@ Go 版启动日志长这样：
 | [`recon-notes.md`](docs/recon-notes.md) | 逆向过程：二进制地址、内存扫描方法、错误码表 |
 | [`pi-subagent.md`](docs/pi-subagent.md) | **pi 内核子代理**：设计、四个「慢」的根因、并发压测数据、**孤儿会话治理**、验收职责划分 |
 | [`asar-integrity-and-limit-mod.md`](docs/asar-integrity-and-limit-mod.md) | **三层防篡改与输出上限改造（65536→131072）**：bytenode 字节码定位、asar 头部/exe 哈希同步、签名自校验的「非 Valid 即放行」分支、进程内存验收方法、**别名 vs 真实模型名**调查 |
-| [`sensitive-truncation-and-retry.md`](docs/sensitive-truncation-and-retry.md) | **云端敏感截断**：`finish_reason=sensitive` 的原始 SSE 帧、分层排除过程、三条失败方案（改帧/原样重放 401/中途换流的 0.5s 静默坑）、最终处置（sink 留痕 + pi 层新建会话重跑） |
 
 **方案 A（直连网关，支持自定义 tools）—— ★ 推荐用 Go 版**
 
@@ -657,7 +655,7 @@ Go 版启动日志长这样：
 | `scripts/get-session-key.py` | 从 TeleAgent 进程内存取 `SUPER_AGENT_LOCAL_SESSION_KEY` → `session.key` |
 | `scripts/kernel-probe.js` | 带本地签名探测内核接口（调试用） |
 | `scripts/start-local-shim.cmd` | 启动方案 B（先取密钥再起 shim） |
-| `scripts/pi/teleagent-subagent.ts` | **pi 内核子代理扩展**（方案 B 推荐用法：并发扇出 + 防孤儿 + 自动放行 + 敏感截断自动重跑），见 [`docs/pi-subagent.md`](docs/pi-subagent.md) |
+| `scripts/pi/teleagent-subagent.ts` | **pi 内核子代理扩展**（方案 B 推荐用法：并发扇出 + 防孤儿 + 自动放行），见 [`docs/pi-subagent.md`](docs/pi-subagent.md) |
 
 **其他**：`assets/cover.png`（封面，由 TeleAgent 生图工具生成）、`LICENSE`。
 
