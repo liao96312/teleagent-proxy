@@ -1,4 +1,6 @@
-# TeleAgent 模型反代 —— 本地 OpenAI 兼容接口（两种方案）
+# TeleAgent Proxy
+
+**语言：** 简体中文
 
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)
 ![Go](https://img.shields.io/badge/Go-1.26.5-00ADD8?logo=go&logoColor=white)
@@ -21,6 +23,19 @@
 把 **TeleAgent（电信 AI「超级智能体」桌面 App）** 的模型能力，在本机暴露成**标准 OpenAI 兼容接口**（`http://127.0.0.1:8788/v1`），让 pi / Cline / Cursor / 任何 OpenAI 客户端 / 脚本都能调用它的模型（`chat-pro` / `chat-lite` / `chat-flash`）。
 
 本仓库给出**两种实现方案**，请按需选择：
+
+## 核心能力
+
+| 模块 | 能力 |
+| --- | --- |
+| OpenAI 兼容层 | 暴露 `/v1/models` 与 `/v1/chat/completions` |
+| 方案 A | 直连云网关，支持调用方自定义 tools |
+| 方案 B | 复用 App 本地 server，可调用内核自带工具 |
+| 客户端接入 | 支持 pi、Cline、Cursor 与通用 OpenAI 客户端 |
+| 恢复工具 | 提供密钥提取、启动、自检与迁移脚本 |
+| 调试资料 | 包含请求结构、传输差异、封禁风险与排错文档 |
+
+## 方案对比
 
 | | 方案 A：直连云网关 | 方案 B：走 App 本地 server |
 |---|---|---|
@@ -53,7 +68,7 @@
 
 ---
 
-## 0. 快速开始（老手看这段就够）
+## 0. 快速开始
 
 > **推荐用 Go 版**（传输层指纹与 TeleAgent 内核一致 + 用真实内核会话）。
 
@@ -664,3 +679,7 @@ Go 版启动日志长这样：
 **一句话**：方案 A 装一次（`setup.cmd`）→ 编译一次（`go\build.cmd`）→ 之后开机双击 `start-shim-go.cmd`（推荐）或 `start-shim.cmd`。
 两者都监听 `127.0.0.1:8788/v1`，客户端配置不用改。
 **要安全**选方案 B（走 App 本地 server）；**要自定义工具（pi 编码）**选方案 A（优先 Go 版）。
+
+## 当前状态
+
+两种方案均已实现并监听同一 OpenAI 兼容地址。该仓库仅用于本机研究，存在服务条款与账号封禁风险；使用前请先阅读 [`docs/ban-risk.md`](docs/ban-risk.md)。
