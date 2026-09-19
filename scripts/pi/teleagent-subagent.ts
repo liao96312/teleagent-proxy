@@ -460,6 +460,7 @@ async function runTask(
 	timeoutSec: number,
 	signal: AbortSignal | undefined,
 	onUpdate: ((u: { content: { type: "text"; text: string }[] }) => void) | undefined,
+	useAgent = false,
 ): Promise<RunResult> {
 	onUpdate?.({ content: [{ type: "text", text: "正在内核建会话…" }] });
 	const created = await kernelCall("POST", "/session", { title: shortTitle(task) }, { timeoutMs: 20_000, signal });
@@ -470,7 +471,7 @@ async function runTask(
 	ACTIVE_SESSIONS.add(sessionId);
 
 	onUpdate?.({
-		content: [{ type: "text", text: `已交给 TeleAgent 内核自治执行（${sessionId}，模型 ${model}）…` }],
+		content: [{ type: "text", text: `已交给 TeleAgent 内核自治执行（${sessionId}，模型 ${model}${useAgent ? `，agent ${SUBAGENT_AGENT}` : ""}）…` }],
 	});
 
 	const body: Record<string, unknown> = {
@@ -478,6 +479,7 @@ async function runTask(
 		parts: [{ type: "text", text: task }],
 	};
 	if (KERNEL_MODE) body.mode = KERNEL_MODE;
+	if (useAgent && SUBAGENT_AGENT) body.agent = SUBAGENT_AGENT;
 
 	// 保险：即使内核仍然发出权限确认，也自动放行（否则无人值守会永久卡住）
 	const stopAutoApprove = startAutoApprove();
@@ -628,6 +630,85 @@ E6 任务里“列出产物/报告结果”一律按本格式回答：禁止表�
 	const FAST_END =
 		"\n\n（输出契约：≤6行＝一句结论+每产物一行 RAW=<绝对路径>，可加 NOTE/FAIL 行；没有产物就不写 RAW；禁止表格、复述文件内容、反问确认、寒暄。）";
 
+	const SUBAGENT_AGENT = process.env.TA_AGENT ?? "ta-subagent";
+	const SUBAGENT_PROMPT = `你是「无人值守执行子代理」：任务由外部编排程序下发并验收，你看不到任何对话上下文，也没有可以沟通的用户。
+
+【怎么做】
+1 只动手：不打招呼、不解释过程、不列计划、不汇报中间状态；不要使用 todowrite/todoread、report_final_files、question、task、skill*、session_*。
+2 任务里给出的路径就是唯一目标路径，视为已获授权：直接读/写/覆盖/删除，不要请求确认，不要改写到工作目录、.temp/ 或任何别处，也不要额外创建报告/README/总结文件。
+3 先想清需要调用的全部工具，互相独立的调用合并在同一条消息里并行发出；不做与任务无关的目录浏览和文件读取。
+4 联网只用 online_search 与 webfetch（搜索结果里的 URL 可直接 webfetch）。
+5 命令直接前台同步执行（用工具自带 timeout），不要套后台命令注册表/轮询模板，不要 Start-Sleep 等待。
+6 不要读回自己刚写的文件做校验、不要统计字节数、不要重做：产物一次成型即交付，验收由编排方负责。
+7 文件格式严格用任务指定的扩展名；任务没指定时选最简可用格式（结构化数据 .json/.csv，纯文本 .log，文档 .md），不要默认转 .html/.docx。
+8 目录不存在时先建目录（write 工具不会自动创建父目录，会直接报 cannot find the path）；也可以直接用一条 powershell 命令完成「建目录 + 写文件」，省一轮。
+
+【输出（硬性，≤6 行）】
+第一行一句话结论；随后每个真实存在的产物一行 RAW=<绝对路径>（没有产物就不写 RAW）；有合理假设可加一行 NOTE=<一句话>；失败只输出 FAIL=<一句话：卡在哪、已试过什么>。
+禁止表格、禁止复述文件内容、禁止贴代码或日志、禁止反问确认。
+
+【已知事实，别在这上面浪费时间】
+- AIGC 水印是预期行为且无法避免：.txt 会被插入约 3500 个零宽字符（十几字节的内容会膨胀到约 10KB），.md 会被插入约 400 字节的文件头，.docx/.xlsx/.pdf 同理。不要清除它、不要因它重做；任务说“内容恰好 N 行”时照写即可。
+- 以下工具已被权限拒绝，试了只会白费时间：websearch、baidu_search、codesearch、arxiv_search、coze_search、image_read；也没有 bash，终端操作用 powershell。`;
+	const FAST_END =
+		"\n\n（输出契约：≤6行＝一句结论+每产物一行 RAW=<绝对路径>，可加 NOTE/FAIL 行；没有产物就不写 RAW；禁止表格、复述文件内容、反问确认、寒暄。）";
+
+	/**
+	 * 惰性把子代理协议注册成内核 agent（进程内只试一次）。
+	 *
+	 * 机制（2026-09-19 实测验证）：PATCH /global/config {agent:{<名>:{mode,prompt,permission}}}
+	 * → 运行时注册，**不用重启 App**；随后 POST /session/:id/message 带 agent:"<名>"，
+	 * 该 agent 的 prompt 就是系统提示词（替掉内核 29k 默认提示词）。
+	 *
+	 * 已逐一证伪的旁路（不要再试）：
+	 *   × per-message `system` 字段：schema 只收 string，但收下不生效；
+	 *   × AGENTS.md / CLAUDE.md（工作区与 $XDG_CONFIG_HOME/opencode/ 两处）均不被读取；
+	 *   × $XDG_CONFIG_HOME/opencode/opencode.jsonc：内核二进制里 `opencode.json(c)` 出现 0 次，
+	 *     无配置文件加载器，配置只走 `OPENCODE_CONFIG_CONTENT`（App 在 JS 里现造、经 stdin 交给内核）；
+	 *   × PATCH /config：显式 `config.update is not implemented yet`；只有 /global/config 能用；
+	 *   × agent 加 hidden:true 会被内核回退成默认人格；
+	 *   × mode:"yolo" 压不过 agent 自己的 permission deny。
+	 */
+	let agentEnsure: Promise<boolean> | null = null;
+	let agentEnsureForKey = "";
+	/** 协议指纹：prompt 改了也要重新注册 */
+	const promptFingerprint = (s: string): string => {
+		let h = 5381;
+		for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+		return h.toString(36);
+	};
+	const ensureSubagentAgent = (): Promise<boolean> => {
+		// sessionKey 每次 App 重启都会变；再叠上协议指纹 → 重启或改协议都会自动重新注册
+		const version = `${cachedKey ?? ""}|${promptFingerprint(SUBAGENT_PROMPT)}`;
+		if (agentEnsure && agentEnsureForKey === version) return agentEnsure;
+		agentEnsureForKey = version;
+		agentEnsure = (async () => {
+			if (!SUBAGENT_AGENT) return false;
+			try {
+				// 照抄主 agent 的 permission：工具白名单/黑名单跟着 App 走，不自己硬编码
+				const cfg = await kernelCall("GET", "/config", undefined, { timeoutMs: 20_000 });
+				const agents = (cfg.json as any)?.agent ?? {};
+				const base = agents["opencowork-default"] ?? agents["opencowork-qwen"] ?? agents["opencowork-deepseek"];
+				const def: Record<string, unknown> = {
+					description: "pi 编排方下发的无人值守执行子代理",
+					mode: "primary",
+					prompt: SUBAGENT_PROMPT,
+				};
+				if (base?.permission) def.permission = base.permission;
+				const r = await kernelCall("PATCH", "/global/config", { agent: { [SUBAGENT_AGENT]: def } }, { timeoutMs: 20_000 });
+				if (r.status !== 200) {
+					console.error(`[teleagent] 注册 agent 失败（PATCH /global/config → ${r.status}），回退为任务文本注入协议`);
+					return false;
+				}
+				return true;
+			} catch (e) {
+				console.error(`[teleagent] 注册 agent 异常（${(e as Error).message}），回退为任务文本注入协议`);
+				return false;
+			}
+		})();
+		return agentEnsure;
+	};
+
 	pi.registerTool({
 		name: "teleagent",
 		label: "TeleAgent Subagent",
@@ -670,14 +751,15 @@ E6 任务里“列出产物/报告结果”一律按本格式回答：禁止表�
 			const model = (params.model ?? "chat-pro") as ModelId;
 			const list = (params.tasks?.length ? params.tasks : [params.task ?? ""]).map((t) => t.trim()).filter(Boolean);
 			if (!list.length) throw new Error("task / tasks 至少要有一个非空任务");
+			const useAgent = FAST_ON ? await ensureSubagentAgent() : false;
 			const prep = (t: string) =>
-				(mode === "readonly" ? RO : "") + (FAST_ON ? FAST + t + FAST_END : t);
+				(mode === "readonly" ? RO : "") + (FAST_ON ? (useAgent ? "" : SUBAGENT_PROMPT) + t + FAST_END : t);
 
 			type Outcome = { idx: number; ok: boolean; res?: RunResult; err?: string };
 
 			// 单任务：走原路径，保留 onUpdate 流式提示
 			if (list.length === 1) {
-				const res = await runTask(prep(list[0]), model, timeoutSec, signal, onUpdate as any);
+				const res = await runTask(prep(list[0]), model, timeoutSec, signal, onUpdate as any, useAgent);
 				const tk = res.tokens || {};
 				return {
 					content: [{ type: "text", text: formatResult(res) }],
@@ -707,7 +789,7 @@ E6 任务里“列出产物/报告结果”一律按本格式回答：禁止表�
 					const i = cursor++;
 					if (i >= list.length) return;
 					try {
-						outcomes[i] = { idx: i, ok: true, res: await runTask(prep(list[i]), model, timeoutSec, signal, undefined) };
+						outcomes[i] = { idx: i, ok: true, res: await runTask(prep(list[i]), model, timeoutSec, signal, undefined, useAgent) };
 					} catch (e) {
 						outcomes[i] = { idx: i, ok: false, err: (e as Error).message };
 					}

@@ -40,6 +40,8 @@ pi 侧只保留两个职责：**下发任务**、**验收产物**。中间的「
 | POST | `/permission/:id/reply` | `{"reply":"always"}` 自动放行 |
 | **POST** | **`/session/:id/abort`** | **终止会话 —— 治孤儿的关键，见 §5** |
 | GET | `/session` | 列出所有会话（清孤儿用） |
+| GET | `/config` | 内核当前配置（agent / mcp / provider / permission / instructions） |
+| **PATCH** | **`/global/config`** | **运行时注册/覆盖 agent —— 换系统提示词的关键，见 §8**（`/config` 的同名方法返回 501） |
 
 请求体：
 
@@ -47,7 +49,8 @@ pi 侧只保留两个职责：**下发任务**、**验收产物**。中间的「
 {
   "model": { "providerID": "NewApi", "modelID": "chat-pro" },
   "parts": [{ "type": "text", "text": "<任务>" }],
-  "mode": "yolo"
+  "mode": "yolo",
+  "agent": "ta-subagent"
 }
 ```
 
@@ -238,19 +241,58 @@ teleagent({
 
 ---
 
-## 8. 执行协议 v2（注入进任务文本的「系统提示词」）
+## 8. 执行协议 v3 —— 把协议**注册成内核的 agent 系统提示词**
 
-### 8.1 为什么协议要放进任务文本
+> v1/v2 是「把协议塞进任务文本去压内核那 29k 默认提示词」；v3 直接**换掉系统提示词本身**。
+> 下面的机制全部经过实验验证，同时列出了**已证伪的旁路**——改之前先读 §8.2，别再走回头路。
 
-pi 扩展和 `qoder-ta.mjs` 都不接受调用方自定义 `tools`，也不能改内核的 agent ——
-为了把内核从「陪聊型办公助手」扭成「无人值守执行子代理」，唯一有效的注入点就是任务文本本身：
-内核会**顶掉** per-message `system` 字段，`/config` 不支持运行时更新，
-`~/.config/opencode/opencode.jsonc` 里自定义 agent 也不热加载（实测 `agent:"ta-fast"` 会静默回退默认 agent）。
+### 8.1 机制（三行 API）
 
-协议 = 头部协议 + 任务 + **尾部输出契约**。尾部必须保留：
-实测格式规则只放开头会被任务自身的措辞（"列出产物"之类）稀释。
+```bash
+# 1) 注册/覆盖一个 agent：prompt 就是它的系统提示词
+PATCH /global/config
+{ "agent": { "ta-subagent": { "description":"…", "mode":"primary",
+                              "prompt":"<协议>", "permission": <照抄主 agent 的 permission> } } }
 
-### 8.2 它到底在压什么
+# 2) 建会话时指定 agent → 内核用 ta-subagent 的 prompt 当系统提示词
+POST /session
+{ "title":"…" }
+
+# 3) 发任务时带上 agent
+POST /session/:id/message
+{ "model":{"providerID":"NewApi","modelID":"chat-pro"},
+  "parts":[{"type":"text","text":"<任务 + 一句尾部输出契约>"}],
+  "mode":"yolo", "agent":"ta-subagent" }
+```
+
+要点：
+
+- **`PATCH /global/config` 是运行时生效的，不用重启 App**（实测：PATCH 后立刻 `GET /config` 就能看到新 agent，且马上可用）；
+- PATCH 是**深合并**，只加 `agent` 这一个 key，其余（provider / mcp / instructions / permission / small_model）实测**原样不变**；
+- **PATCH 只在内存生效**：App 重启后内核配置由主进程重建，agent 就没了 → 客户端要用 `sessionKey` 变化当作版本号**自动重新注册**（协议文本改了也要重注，所以版本号里再叠一个 prompt 指纹）；
+- agent 的 `permission` **直接照抄 `opencowork-default`**，别自己硬编码：App 改了权限策略时能自动跟上。实测这个 permission 已足够（powershell allow、`external_directory` 对区外 ask→扩展每 150ms 自动放行、bash deny）；
+- **不要给 agent 加 `hidden: true`**：实测加了之后内核会**回退成默认人格**（prompt 不生效）；
+- 注册失败（老版本内核、路由变动）时客户端**自动回退**到 v2 的做法（把协议写进任务文本），不会直接不能用。`TA_AGENT=""` 可手动关闭该机制。
+
+### 8.2 已证伪的旁路（都试过，别再试）
+
+| 想法 | 实测结果 |
+|---|---|
+| `POST /session/:id/message` 带 `system` 字段 | schema **只收 string**（收 array 报 `invalid body`），但就算传对类型也**收下不生效**：模型仍按默认 agent 回答 |
+| 往工作目录放 `AGENTS.md` | 不读。产出仍是默认人格，token 无变化 |
+| 往 `$XDG_CONFIG_HOME/opencode/AGENTS.md` 放 | 不读 |
+| 往 `$XDG_CONFIG_HOME/opencode/opencode.jsonc` 写自定义 agent | 不读（也不热加载）。**内核二进制里 `opencode.json(c)` 字符串出现 0 次**，它根本没有配置文件加载器 |
+| 往 `~/.config/opencode/opencode.jsonc` 写 | 同样不读。注意：**这个目录不是内核的配置目录**——内核的 `OPENCODE_CONFIG_DIR` / `XDG_CONFIG_HOME` 都是 `C:\Users\Administrator\.config\TeleAgent\users\<account-id>`（用 `scripts/env-probe.py` 扫进程内存实测得到）。之前的会话就是找错了目录，得出过「不热加载」的错误结论 |
+| `PATCH /config` | 路由存在，但显式返回 `config.update is not implemented yet`（501）。**只有 `/global/config` 能用** |
+| 改 `instructions` 里列的文件（如那个不存在的 `USER.md`） | 写入后无任何效果（配置与指令在启动时已定型） |
+| 选内置的其它 agent（`title`、`skill-scanner-*`） | `agent` 字段确实生效，但这些 agent 全是 `permission:{"*":"deny"}` → **拿不到 shell/文件工具**；而且 `mode:"yolo"` **压不过** agent 自己的 permission deny |
+| 选内置主 agent（`opencowork-*`） | 三个主 agent 的 prompt **完全一样**（同一份 29k），换了没意义 |
+| 改 `user-agent-config.json`（`features.watermark.aiWatermarkEnabled`） | 该开关落在 App 侧 hook，实测置 `false` 后水印**照样注入**，且文件在 App 启动时读入 → 不可靠 |
+
+> 换句话说：**内核的系统提示词只来自 `OPENCODE_CONFIG_CONTENT`**（App 在 JS 里现造、经 stdin 交给内核）。
+> 任何磁盘文件都改不动它。能改的只有那个**运行时配置 API**。
+
+### 8.3 它到底在压什么（为什么值得换掉）
 
 内核默认系统提示词（29k 字符，备份在 `D:\tele proxy\main-agent-prompt.txt`）里有 **9 条与「无人值守子代理」直接冲突的硬要求**：
 
@@ -262,14 +304,13 @@ pi 扩展和 `qoder-ta.mjs` 都不接受调用方自定义 `tools`，也不能�
 | 敏感操作确认 | "confirm before execution"，可用 `Question` 或自然语言 | **以「提问」收尾 = 无人值守下静默失败** |
 | Background command 注册表模板 | prepare/start/poll/inspect/cleanup 五段式 | 长命令多 4~5 轮，还可能留孤儿进程 |
 | Document Delivery Format | 未指定格式时 "default to creating an `.html`" | pi 拿到意外扩展名 |
-| AIGC 水印说明 | 见 §8.3 | 子代理读回校验必失败 → 重做循环 |
+| AIGC 水印说明 | 见 §8.4 | 子代理读回校验必失败 → 重做循环 |
 | WebFetch 不猜 URL | "NEVER generate or guess URLs" | 联网任务无谓犹豫 |
 | Language / Adaptive communication style | "always respond in Chinese" / 分技术与非技术用户 | 输出啰嗦 |
 
-已按 `kernel-config.json` 里的权限 deny 校正工具清单：联网只走 `online_search` / `webfetch`；
-`websearch` / `baidu_search` / `codesearch` / `arxiv_search` / `coze_search` / `image_read` 全部被 deny。
+v1/v2 只能在任务文本里**逐条声明「以上作废」**（提示词级对抗）；v3 是**换掉提示词**，这些要求根本不存在了。
 
-### 8.3 ★ AIGC 水印 —— 实测最坑的一环
+### 8.4 ★ AIGC 水印 —— 实测最坑的一环
 
 内核会给交付物**自动注水印，子代理和 pi 都无法避免**：
 
@@ -279,68 +320,49 @@ pi 扩展和 `qoder-ta.mjs` 都不接受调用方自定义 `tools`，也不能�
 | `.md` | 文件头插入 `---AIGC: ...` 块 | 约 430 字节 |
 | `.json` `.csv` `.log` `.py` `.png` | **无污染，字节精确** | 33 字节就是 33 字节 |
 
-后果与对策：
+对策：要「字节精确 / 可解析 / 可 diff」的交付物**点 `.json` / `.csv` / `.log` 扩展名**；
+协议里明确写「水印是预期行为，不要读回、不要清除、不要因它重做」，否则子代理会发现多出 3500 个字符然后进入重做循环。
 
-1. 任务里写"内容恰好三行" + 要求（或默许）读回校验 → 子代理发现多出 3500 个字符 → **重做循环**。
-   所以协议 B5/D2 明写：水印是预期行为，不要读回、不要清除、不要因水印重做；
-2. 要「字节精确 / 可解析 / 可 diff」的交付物，**点 `.json` / `.csv` / `.log` 扩展名**，别要 `.txt` / `.md`；
-3. pi 侧验收时不要把水印当内容错误。
+### 8.5 实测数据
 
-### 8.4 A/B 实测（2026-09-19，chat-pro，三轮 6+6 会话）
+**A/B（2026-09-19，chat-pro，3 任务 × 2 臂，同时跑）**：臂 A = v2（协议写进任务文本），臂 B = v3（agent = 系统提示词）。
 
-任务集：文件写入、覆盖+删除、联网调研、长命令（1..4e7 累加）、格式自选。
-用例与复测方法在仓库 [`bench/`](../bench/README.md)（本机路径 `D:\tele proxy\bench\`）。
-
-| 指标 | v1 | v2 |
+| 指标 | A：协议写进任务文本 | B：协议=系统提示词 |
 |---|---|---|
-| 正确率 | 100%（6/6） | 100%（6/6） |
-| 典型轮次 / 工具调用 | 2 轮 / 1 次 | 2 轮 / 1 次 |
-| 联网调研任务 | 6 轮 / 5 工具 / 38 s | **5 轮 / 4 工具 / 31 s** |
-| 格式自选产物 | `.txt`（内含 3.5k 零宽字符，×9 体积） | `.md`（430 B AIGC 头） |
-| todowrite / 后台注册表 / 确认提问 | 0 / 0 / 0 | 0 / 0 / 0 |
+| 正确率 | 2/3 | **3/3** |
+| 批墙钟 | 22 s | **16 s** |
+| 失败形态 | ★ **静默失败**：任务 #2 只跑了 1 轮、**0 次工具调用**，却报告 `RAW=…\note.txt` 说「已创建」，**文件根本不存在** | 无 |
 
-结论：**两版都已贴在"2 轮 / 1 次工具调用"的地板上**，差异在覆盖面。
-v2 的价值是把水印、确认提问、格式默认、工具 deny 清单、失败契约都写明；
-联网调研更瘦是附带收益。
+> 静默失败是最危险的一类：编排方拿到的是「成功 + 路径」，磁盘上什么都没有。
+> 机制上说得通——协议挤在任务文本里时，模型容易把任务当成一段**对话请求**，简单任务直接「回答」而不是动手。
 
-### 8.5 换协议做 A/B
+**早前 v1 vs v2 的三轮 6+6 会话实测**（协议都在任务文本里）：两版正确率均 100%、都已是「2 轮对话 / 1 次工具调用」的地板；
+v2 在联网调研类更瘦（5 轮/4 工具/31 s vs 6 轮/5 工具/38 s）。**结论：任务文本注入已到极限，所以才有 v3。**
 
-`qoder-ta.mjs` 支持从文件加载协议（不用改代码）：
+**换提示词省不了 token**（别为此做优化）：内核会把全部工具 schema（`playwright_browser_*` 等 40+ 个）发给模型，
+实测 input 从头到尾都是 **~26k**，把 29k 提示词换成 1k 协议后 input 几乎不变。收益在**冲突消失 + 输出契约合规**，不在 token。
+
+### 8.6 复测与副本一致性
 
 ```bash
-# 文件格式：头部协议 ... 一行 @@@ ... 尾部输出契约
-TA_FAST_FILE="D:\tele proxy\bench\fast-v2.txt" node "D:\tele proxy\qoder-ta.mjs" fan tasks.txt
+# 协议候选 / A/B：TA_FAST_FILE 指向协议文件（一行 @@@ 分隔「协议正文」与「尾部契约」）
+TA_FAST_FILE="D:\tele proxy\bench\fast-v2.txt" node "D:\tele proxy\qoder-ta.mjs" fan <tasks.txt>
+# 关掉 agent 机制、回退到「协议写进任务文本」
+TA_AGENT="" node "D:\tele proxy\qoder-ta.mjs" run "…"
+# 完全不加协议（纯直通）
+node "D:\tele proxy\qoder-ta.mjs" run "…" --no-fast
 ```
 
-`TA_FAST=0` 关闭协议注入（测"无协议"基线）。用例见 [`bench/`](../bench/README.md)。
-
-### 8.6 三处副本的协议文本必须字节一致
+**协议正文在三处各存一份，必须逐字一致**（`const SUBAGENT_PROMPT` 那个模板字符串）：
 
 - 本机 CLI / Codex / Qoder 侧：`D:\tele proxy\qoder-ta.mjs`（不在本仓库）
 - 本机 pi `teleagent` 工具侧：`~/.pi/agent/extensions/teleagent-subagent.ts`
 - 本仓库：`scripts/pi/teleagent-subagent.ts`
 
-注意：**只要求协议文本（`const FAST` 那个模板字符串）逐字一致**，三个文件其余部分可以不同
-（本机 pi 扩展额外带着云端敏感截断重跑，仓库版本没有）。核对方法：用 Python 切出
-`const FAST = \`…\`;` 中间的正文后 `==` 比较。
-
-```bash
-# 打印 True 表示协议正文一致
-python - <<'PY'
-import io
-def f(p):
-    s = io.open(p, encoding='utf-8').read()
-    i = s.index('const FAST = ') + 13
-    return s[i:s.index(chr(96) + ';', i)]
-print(f(r'D:\tele proxy\qoder-ta.mjs') == f(r'scripts/pi/teleagent-subagent.ts'))
-PY
-```
-
-> 历史教训：`scripts/pi/teleagent-subagent.ts` 曾整文件被本机版本覆盖，
-> 把已经 revert 掉的「敏感截断自动重跑」又带回了仓库。同步时请只打协议补丁，
-> 不要 `copy` 整个文件。
-
----
+三个文件**其余部分可以不同**（本机 pi 扩展额外带云端敏感截断重跑，仓库版没有），
+只要求协议正文一致。核对脚本见仓库 `bench/README.md`。
+历史教训：`scripts/pi/teleagent-subagent.ts` 曾整文件被本机版本覆盖，把已经 revert 掉的
+「敏感截断自动重跑」又带回仓库 —— 同步时**只打补丁，不要 `copy` 整个文件**。
 
 ## 9. 安装
 
@@ -384,8 +406,13 @@ python scripts/get-session-key.py
   放开前请评估封号风险（见 [`auto-ban-risk-points.md`](auto-ban-risk-points.md)）。
 - 内核侧 `POST /session/:id/message` 的阻塞语义决定了「一个任务 = 一条长连接」，
   暂时无法做流式进度回传（只能靠轮询历史模拟）。
-- 协议是**提示词级**的约束，不是硬拦截：实测 v2 的一次会话里模型仍调了一次 `report_final_files`
-  （内核原文是 mandatory）。遇到这种残留调用不必惊慌，看最终文本与产物即可；
-  要硬拦只能改内核权限（`permission` 里 `report_final_files: deny`），目前未做。
+- 协议现在真的住在**系统提示词**里（见 §8），但仍不是硬拦截：它只是一份写得很短的提示词，
+  极端情况下模型仍可能自作主张；要硬拦得改配置里的 `permission`。
+- **运行时注册的 agent 不会落盘**：App 重启后消失（客户端会自动重注，见 §8.1）。
+  同理 `PATCH /global/config` **只能增/改、不能删**（传 `null` 会变成 `{}` 空壳，实测删不掉），
+  所以探针 agent 只能等下次重启 App 才清掉。
+- `user-agent-config.json` 里的 `features.watermark.aiWatermarkEnabled` 看着像能关水印，
+  实测置 `false` 后水印**照样注入**，不要指望它。
 - 调试内核 REST 用 `D:\tele proxy\ta-probe.mjs`，**必须**加 `MSYS_NO_PATHCONV=1`，
-  否则 git bash 会把 `/session` 改写成 `C:/.../session` 导致 `400 bad request`。
+  否则 git bash 会把 `/session` 改写成 `C:/.../session` 导致 `400 bad request`；
+  想挖内核/App 的环境变量用 `scripts/env-probe.py`（扫进程内存，同 `get-session-key.py` 的手法）。

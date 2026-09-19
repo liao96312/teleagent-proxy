@@ -1,0 +1,6 @@
+在目录 D:\ta-bench\a 下创建文件 payload.json，内容必须是严格合法的 JSON 且等于：{"arm":"A","ok":true}
+只做这一件事，不要创建其它文件，不要读回校验。
+===
+在目录 D:\ta-bench\a 下创建文件 note.txt，内容必须恰好是一行：MARKER-7（不要有多余的空行）。
+===
+用 online_search 搜索 "curl 8.11 release date"，只回答发布日期（YYYY-MM-DD）和 1 个来源 URL。不要写任何文件。
