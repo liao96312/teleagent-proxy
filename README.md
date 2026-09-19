@@ -486,6 +486,23 @@ teleagent({
    持续生图并反复覆盖产物文件）。扩展里的三条防线是：放弃时 `POST /session/:id/abort`、
    `signal.aborted` 时 abort、进程退出时 abort —— 另提供 `/ta-kill` 事后兜底。
 
+**第三个坑：内核会重写你的交付物（AIGC 水印）**。实测数据：
+
+| 扩展名 | 水印形态 | 实测 |
+|---|---|---|
+| `.txt` | 插入零宽字符（U+200B / U+200D） | 14 字节内容 → **10766 字节**（3584 个零宽字符） |
+| `.md` | 文件头插入 `---AIGC: ...` 块 | 约 430 字节 |
+| `.json` `.csv` `.log` `.py` `.png` | **无污染，字节精确** | 33 字节就是 33 字节 |
+
+所以：要「内容恰好 N 行 / 可解析 / 可 diff」的产物，**点 `.json`/`.csv`/`.log` 扩展名**；
+验收时不要把水印当内容错误；也别让子代理读回自检（它会发现多出 3500 个字符，然后进入重做循环）。
+
+**执行协议（v2）**：扩展会给每个任务自动包上「头部执行协议 + 尾部输出契约」，
+把内核默认系统提示词里 9 条与「无人值守子代理」冲突的硬要求（TodoWrite、`report_final_files`、
+收尾目录自检、敏感操作确认、后台注册表模板、默认 `.html`、水印说明、不猜 URL、语气要求）逐条压掉，
+并强制尾行只输出 `RAW=<绝对路径>` / `FAIL=<原因>`。实测把子代理压到 **2 轮对话 / 1 次工具调用 / 2~40 s**。
+A/B 用例与复测方法见 [`bench/`](bench/README.md)，设计细节见 [`docs/pi-subagent.md`](docs/pi-subagent.md) §8。
+
 ---
 
 ## 5. 接入其它工具
@@ -646,7 +663,7 @@ Go 版启动日志长这样：
 | [`signature-algorithms.md`](docs/signature-algorithms.md) | **两套签名算法**（云网关两轮 HMAC + 内核本地 `X-SA-*`）逐字段说明 |
 | [`ban-risk.md`](docs/ban-risk.md) | 封号机理、触发因素、规避建议（含真实案例时间线） |
 | [`recon-notes.md`](docs/recon-notes.md) | 逆向过程：二进制地址、内存扫描方法、错误码表 |
-| [`pi-subagent.md`](docs/pi-subagent.md) | **pi 内核子代理**：设计、四个「慢」的根因、并发压测数据、**孤儿会话治理**、验收职责划分 |
+| [`pi-subagent.md`](docs/pi-subagent.md) | **pi 内核子代理**：设计、四个「慢」的根因、并发压测数据、**孤儿会话治理**、验收职责划分、**执行协议 v2 + AIGC 水印实测** |
 | [`asar-integrity-and-limit-mod.md`](docs/asar-integrity-and-limit-mod.md) | **三层防篡改与输出上限改造（65536→131072）**：bytenode 字节码定位、asar 头部/exe 哈希同步、签名自校验的「非 Valid 即放行」分支、进程内存验收方法、**别名 vs 真实模型名**调查 |
 
 **方案 A（直连网关，支持自定义 tools）—— ★ 推荐用 Go 版**

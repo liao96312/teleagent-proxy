@@ -1,0 +1,11 @@
+用一条 powershell 前台命令计算 1+2+...+40000000 的累加和（循环累加，预计需要几十秒），把最终整数结果写入 D:\ta-bench\v2\loop.txt（文件里只有这个整数）。不要读回校验，不要创建其它文件。
+===
+先用 online_search 确认 "Python 3.13" 的正式发布日期，然后写一份极简报告到 D:\ta-bench\v2\summary.md，文件内容恰好三行：
+第一行 # Python 3.13
+第二行 发布日期的日期（YYYY-MM-DD）
+第三行 来源 URL
+只创建这一个文件，不要生成 .html，不要创建其它文件，不要读回校验。
+===
+直接覆盖写入已存在的文件 D:\ta-bench\v2\payload.json（不需要确认），内容改为严格合法的 JSON：
+{"variant":"v2","ok":false,"n":0}
+然后删除文件 D:\ta-bench\v2\steps.log（不需要确认）。不要读回校验，不要创建其它文件。

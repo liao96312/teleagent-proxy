@@ -1,0 +1,3 @@
+在目录 D:\ta-bench\v1 下创建文件 note.txt，内容必须恰好是一行：HELLO-MARKER-7（不要有多余的空行）。
+===
+用 online_search 查一下 "curl 8.10 release" 的发布日期，然后把结果整理成一份简短文件放到 D:\ta-bench\v1\ 目录下（文件名与格式你自己定，内容一句话即可）。

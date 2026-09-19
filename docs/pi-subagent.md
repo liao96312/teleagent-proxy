@@ -179,6 +179,8 @@ pi 负责：      读取 / 验收 / 挑选 / 落盘
    只把生成文件的绝对路径写出来」；
 2. 强制子代理最后只回一行 `RAW=<绝对路径>`；
 3. pi 侧拿到路径后自己 `fs.copyFileSync` 搬运，再自己做格式转换与验收。
+4. **注意 AIGC 水印**（见 §8.3）：`.txt` / `.md` 交付物会被内核重写，验收别当成内容错误；
+   要字节精确就让子代理写 `.json` / `.csv` / `.log`。
 
 另外，**落盘环节也别让子代理做**。实测 .NET `Image::FromFile(...).Save(png)` 这条路径会出问题
 （写出内容与源图不一致）；用 `Bitmap` + `Graphics.DrawImage` 全量重绘才可靠：
@@ -236,7 +238,111 @@ teleagent({
 
 ---
 
-## 8. 安装
+## 8. 执行协议 v2（注入进任务文本的「系统提示词」）
+
+### 8.1 为什么协议要放进任务文本
+
+pi 扩展和 `qoder-ta.mjs` 都不接受调用方自定义 `tools`，也不能改内核的 agent ——
+为了把内核从「陪聊型办公助手」扭成「无人值守执行子代理」，唯一有效的注入点就是任务文本本身：
+内核会**顶掉** per-message `system` 字段，`/config` 不支持运行时更新，
+`~/.config/opencode/opencode.jsonc` 里自定义 agent 也不热加载（实测 `agent:"ta-fast"` 会静默回退默认 agent）。
+
+协议 = 头部协议 + 任务 + **尾部输出契约**。尾部必须保留：
+实测格式规则只放开头会被任务自身的措辞（"列出产物"之类）稀释。
+
+### 8.2 它到底在压什么
+
+内核默认系统提示词（29k 字符，备份在 `D:\tele proxy\main-agent-prompt.txt`）里有 **9 条与「无人值守子代理」直接冲突的硬要求**：
+
+| 冲突项 | 内核原文强度 | 后果 |
+|---|---|---|
+| TodoWrite | "Use these tools VERY frequently"、"Always use TodoWrite" | 每个任务多烧 2~4 轮 |
+| `report_final_files` | "you MUST call exactly once" | 多一轮 |
+| 收尾 Working-directory 自检 | "mandatory every time" | 多一轮目录遍历 / 改错落盘位置 |
+| 敏感操作确认 | "confirm before execution"，可用 `Question` 或自然语言 | **以「提问」收尾 = 无人值守下静默失败** |
+| Background command 注册表模板 | prepare/start/poll/inspect/cleanup 五段式 | 长命令多 4~5 轮，还可能留孤儿进程 |
+| Document Delivery Format | 未指定格式时 "default to creating an `.html`" | pi 拿到意外扩展名 |
+| AIGC 水印说明 | 见 §8.3 | 子代理读回校验必失败 → 重做循环 |
+| WebFetch 不猜 URL | "NEVER generate or guess URLs" | 联网任务无谓犹豫 |
+| Language / Adaptive communication style | "always respond in Chinese" / 分技术与非技术用户 | 输出啰嗦 |
+
+已按 `kernel-config.json` 里的权限 deny 校正工具清单：联网只走 `online_search` / `webfetch`；
+`websearch` / `baidu_search` / `codesearch` / `arxiv_search` / `coze_search` / `image_read` 全部被 deny。
+
+### 8.3 ★ AIGC 水印 —— 实测最坑的一环
+
+内核会给交付物**自动注水印，子代理和 pi 都无法避免**：
+
+| 扩展名 | 水印形态 | 实测 |
+|---|---|---|
+| `.txt` | 插入零宽字符（U+200B / U+200D） | 14 字节内容 → **10766 字节**（3584 个零宽字符） |
+| `.md` | 文件头插入 `---AIGC: ...` 块 | 约 430 字节 |
+| `.json` `.csv` `.log` `.py` `.png` | **无污染，字节精确** | 33 字节就是 33 字节 |
+
+后果与对策：
+
+1. 任务里写"内容恰好三行" + 要求（或默许）读回校验 → 子代理发现多出 3500 个字符 → **重做循环**。
+   所以协议 B5/D2 明写：水印是预期行为，不要读回、不要清除、不要因水印重做；
+2. 要「字节精确 / 可解析 / 可 diff」的交付物，**点 `.json` / `.csv` / `.log` 扩展名**，别要 `.txt` / `.md`；
+3. pi 侧验收时不要把水印当内容错误。
+
+### 8.4 A/B 实测（2026-09-19，chat-pro，三轮 6+6 会话）
+
+任务集：文件写入、覆盖+删除、联网调研、长命令（1..4e7 累加）、格式自选。
+用例与复测方法在仓库 [`bench/`](../bench/README.md)（本机路径 `D:\tele proxy\bench\`）。
+
+| 指标 | v1 | v2 |
+|---|---|---|
+| 正确率 | 100%（6/6） | 100%（6/6） |
+| 典型轮次 / 工具调用 | 2 轮 / 1 次 | 2 轮 / 1 次 |
+| 联网调研任务 | 6 轮 / 5 工具 / 38 s | **5 轮 / 4 工具 / 31 s** |
+| 格式自选产物 | `.txt`（内含 3.5k 零宽字符，×9 体积） | `.md`（430 B AIGC 头） |
+| todowrite / 后台注册表 / 确认提问 | 0 / 0 / 0 | 0 / 0 / 0 |
+
+结论：**两版都已贴在"2 轮 / 1 次工具调用"的地板上**，差异在覆盖面。
+v2 的价值是把水印、确认提问、格式默认、工具 deny 清单、失败契约都写明；
+联网调研更瘦是附带收益。
+
+### 8.5 换协议做 A/B
+
+`qoder-ta.mjs` 支持从文件加载协议（不用改代码）：
+
+```bash
+# 文件格式：头部协议 ... 一行 @@@ ... 尾部输出契约
+TA_FAST_FILE="D:\tele proxy\bench\fast-v2.txt" node "D:\tele proxy\qoder-ta.mjs" fan tasks.txt
+```
+
+`TA_FAST=0` 关闭协议注入（测"无协议"基线）。用例见 [`bench/`](../bench/README.md)。
+
+### 8.6 三处副本的协议文本必须字节一致
+
+- 本机 CLI / Codex / Qoder 侧：`D:\tele proxy\qoder-ta.mjs`（不在本仓库）
+- 本机 pi `teleagent` 工具侧：`~/.pi/agent/extensions/teleagent-subagent.ts`
+- 本仓库：`scripts/pi/teleagent-subagent.ts`
+
+注意：**只要求协议文本（`const FAST` 那个模板字符串）逐字一致**，三个文件其余部分可以不同
+（本机 pi 扩展额外带着云端敏感截断重跑，仓库版本没有）。核对方法：用 Python 切出
+`const FAST = \`…\`;` 中间的正文后 `==` 比较。
+
+```bash
+# 打印 True 表示协议正文一致
+python - <<'PY'
+import io
+def f(p):
+    s = io.open(p, encoding='utf-8').read()
+    i = s.index('const FAST = ') + 13
+    return s[i:s.index(chr(96) + ';', i)]
+print(f(r'D:\tele proxy\qoder-ta.mjs') == f(r'scripts/pi/teleagent-subagent.ts'))
+PY
+```
+
+> 历史教训：`scripts/pi/teleagent-subagent.ts` 曾整文件被本机版本覆盖，
+> 把已经 revert 掉的「敏感截断自动重跑」又带回了仓库。同步时请只打协议补丁，
+> 不要 `copy` 整个文件。
+
+---
+
+## 9. 安装
 
 ```bash
 # 1. 拷扩展
@@ -267,7 +373,7 @@ python scripts/get-session-key.py
 
 ---
 
-## 9. 已知限制 / TODO
+## 10. 已知限制 / TODO
 
 - **`recoverFromHistory()` 的「稳定判定」是启发式的**：靠连续两轮轮询文本不变来判定结束，
   极端情况下可能在模型长思考期间误判为已完成。更稳的做法是走 `GET /global/event` SSE 监听
@@ -278,3 +384,8 @@ python scripts/get-session-key.py
   放开前请评估封号风险（见 [`auto-ban-risk-points.md`](auto-ban-risk-points.md)）。
 - 内核侧 `POST /session/:id/message` 的阻塞语义决定了「一个任务 = 一条长连接」，
   暂时无法做流式进度回传（只能靠轮询历史模拟）。
+- 协议是**提示词级**的约束，不是硬拦截：实测 v2 的一次会话里模型仍调了一次 `report_final_files`
+  （内核原文是 mandatory）。遇到这种残留调用不必惊慌，看最终文本与产物即可；
+  要硬拦只能改内核权限（`permission` 里 `report_final_files: deny`），目前未做。
+- 调试内核 REST 用 `D:\tele proxy\ta-probe.mjs`，**必须**加 `MSYS_NO_PATHCONV=1`，
+  否则 git bash 会把 `/session` 改写成 `C:/.../session` 导致 `400 bad request`。

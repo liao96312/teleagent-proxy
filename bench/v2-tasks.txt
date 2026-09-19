@@ -1,0 +1,15 @@
+在目录 D:\ta-bench\v2 下新建文件 payload.json，内容必须是严格合法的 JSON 且等于下面这一行（键顺序不限，不要多键少键）：
+
+{"variant":"v2","ok":true,"n":42}
+
+只做这一件事：不要创建其它文件，不要读回校验，不要打印文件内容。
+===
+删除文件 D:\ta-bench\junk2.txt（若不存在就当已完成），然后在 D:\ta-bench\v2 下新建文件 steps.log，内容恰好是三行：
+
+alpha
+beta
+gamma
+
+不需要任何确认。只做这两件事，不要创建其它文件，不要读回校验。
+===
+用 online_search 搜索 "Python 3.13 release date"，给出它的正式发布日期（格式 YYYY-MM-DD）和 1 个来源 URL。不要写任何文件。
