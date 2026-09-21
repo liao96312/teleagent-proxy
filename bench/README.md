@@ -13,8 +13,11 @@ v3 下协议**不是一个前缀字符串，而是内核里的一个 agent**：�
 `qoder-ta.mjs` 的 `fan` 会把一个文件按 `===` 行拆成多个任务并发跑：
 
 ```bash
-# 默认 = agent 模式（会用 SUBAGENT_PROMPT 注册 agent）
+# 默认 = agent 模式 + append 注入（正版提示词全文 + 末尾追加协议）
 node qoder-ta.mjs fan bench/r4-b.txt --concurrency 3 --model chat-pro --timeout 600
+
+# 激进模式：只发协议本体（system prompt 与正版差异最大，见 docs/pi-subagent.md §8.7）
+TA_AGENT_MODE=replace node qoder-ta.mjs fan bench/r4-b.txt --concurrency 3
 
 # 关掉 agent 机制，回退到「协议写进任务文本」的旧做法（用于 A/B 对照）
 TA_AGENT="" node qoder-ta.mjs fan bench/r4-a.txt --concurrency 3

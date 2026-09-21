@@ -269,6 +269,12 @@ POST /session/:id/message
 
 - **`PATCH /global/config` 是运行时生效的，不用重启 App**（实测：PATCH 后立刻 `GET /config` 就能看到新 agent，且马上可用）；
 - PATCH 是**深合并**，只加 `agent` 这一个 key，其余（provider / mcp / instructions / permission / small_model）实测**原样不变**；
+- **`agent` 的 `prompt` 有两种注入方式**（`TA_AGENT_MODE`，默认 `append`）：
+  - `append`（默认）：从 `GET /config` 拿到**运行中的正版提示词全文**，只在末尾追加协议。
+    目的是把封号风险项 **B8**（见 §8.7）压到最小：正版正文一字不动；也不硬编码 29k 副本，App 升级后自动跟上。
+    代价：正版里那 9 条冲突要求仍在文本里，只能靠协议开头的「冲突处以本节为准」压住 —— 对抗强度回到 v2，
+    但位置在系统提示词末尾，recency 比任务文本强。
+  - `replace`：只发协议本体，完全替掉正版提示词。冲突治理最干净，但 **B8 暴露最大**，只适合小号/实验号。
 - **PATCH 只在内存生效**：App 重启后内核配置由主进程重建，agent 就没了 → 客户端要用 `sessionKey` 变化当作版本号**自动重新注册**（协议文本改了也要重注，所以版本号里再叠一个 prompt 指纹）；
 - agent 的 `permission` **直接照抄 `opencowork-default`**，别自己硬编码：App 改了权限策略时能自动跟上。实测这个 permission 已足够（powershell allow、`external_directory` 对区外 ask→扩展每 150ms 自动放行、bash deny）；
 - **不要给 agent 加 `hidden: true`**：实测加了之后内核会**回退成默认人格**（prompt 不生效）；
@@ -342,7 +348,63 @@ v2 在联网调研类更瘦（5 轮/4 工具/31 s vs 6 轮/5 工具/38 s）。**
 **换提示词省不了 token**（别为此做优化）：内核会把全部工具 schema（`playwright_browser_*` 等 40+ 个）发给模型，
 实测 input 从头到尾都是 **~26k**，把 29k 提示词换成 1k 协议后 input 几乎不变。收益在**冲突消失 + 输出契约合规**，不在 token。
 
-### 8.6 复测与副本一致性
+### 8.7 ★ 封号视角：这么改会不会被服务端看出来？
+
+先说结论：**会被看到，但是不是会被判定，目前无证据。默认已改为风险最小的 `append` 模式。**
+
+#### 为什么“会被看到”是必然的
+
+云网关是 OpenAI 风格的 `POST /superCowork/sapi/api/v1/chat/completions`，body 是
+`{"max_tokens":65536,"messages":[...],"tools":[...]}`（见 [`wire-fidelity.md`](wire-fidelity.md)）。
+`messages` 的第一条就是系统提示词。我们改了它之后模型行为确实变了（§8.5 实测），
+而到达模型的唯一路径就是这条请求 —— **所以提示词文本必然在 body 里发给了网关**。
+`agent` 名字本身倒是不出本地（body 里没有 agent 字段），服务端能看到的**只有提示词内容**。
+
+#### 你自己的风险清单里已经把它列成 🔴 了
+
+[`auto-ban-risk-points.md`](auto-ban-risk-points.md) 的 **B8**：
+
+> **body 语义（tools / system prompt 与内核不同）** —— 内核发固定的 tools 集 + 专属 system prompt
+
+风险表里的处置写的是「**只能改走方案 B**」—— 也就是说：
+**方案 A（shim）在 body 语义上永远对不齐；方案 B（内核自己发）才对得齐。**
+而 v3 的效果是：方案 B 里把 system prompt 改成了非正版 → **等于把 B8 从方案 A 搬进了方案 B**。
+（v1/v2 把协议写在任务文本里，**不碰 system prompt**，所以没这个问题——这是 v2 一个被低估的优点。）
+同文档 E5 也列了：「B8 的判定方式（是否真做 body 语义比对）」，至今**未知**。
+
+#### 降低暴露的两个事实 / 一个待验证
+
+已经能确认的：
+
+1. **提示词是客户端现造的**：App 在 JS 里 `generateAgentConfigsFn(...)` 拼好、经 stdin 交给内核（§8.2），
+   随 App 版本变化。服务端不可能要求一个跨版本不变的固定 blob，否则 App 自己升级就崩。
+2. **同版本内，正版提示词在本机是固定文本**（实测这份 29k 里没有机器名/账号 ID/路径等机器相关字段，
+   见 `main-agent-prompt.txt` 的 grep 结果）→ 所以“同版本内按内容指纹比对”在技术上**是可行的**，
+   不能拿“各机器不一样”当挡箭牌。
+
+**还没验证、也是回答你这个问题最关键的一步**：
+
+3. `instructions`（那 4 个 memory 文件：`PATHS.md` / `MEMORY.md` / `USER.md` / `LATEST_DAILY_MEMORY.md`）
+   是**用户可写**的，App 自己的注释写着「These files will be automatically loaded into system prompt for all sessions」。
+   **如果这是真的**，那么系统提示词本来就会随用户内容变化 → 服务端**不可能**做全文哈希比对，
+   “改动提示词”就从 🔴 降为普通的“用户自定义指令”。
+   → 验证方法：往 `MEMORY.md` 写一串唯一口令 → **重启 App** → 发一个任务 → 用
+   `scripts/scan-gateway-req.py` 把发往网关的原始 wire dump 出来，看口令是否出现在 body 里。
+
+#### 结论与建议
+
+| 方案 | system prompt 与正版的差异 | B8 暴露 | 冲突治理 |
+|---|---|---|---|
+| v2（协议写任务文本） | **0**（逐字相同） | 无 | 靠任务文本对抗，较弱 |
+| **v3 + append（默认）** | 正版全文 + 末尾追加约 1.2k | 小（正版正文完整保留，读起来像“追加用户指令”） | 中 |
+| v3 + replace（`TA_AGENT_MODE=replace`） | 只剩 1.2k 协议 | **大** | 最强 |
+
+- 主号 / 在意合规：**用默认的 append**，并优先把「高风险批量自动化」放到小号上跑；
+- 如果 §8.7-3 验证出「memory 文件确实进系统提示词」，那 append 的剩余风险就很低了；
+- 如果验证出「提示词是完全固定的、且没有任何用户可写内容掺进去」，那么对主号应该**回到 v2**
+  （即 `TA_AGENT=""`，协议回到任务文本），把速度/合规的收益换成身份安全。
+
+### 8.8 复测与副本一致性
 
 ```bash
 # 协议候选 / A/B：TA_FAST_FILE 指向协议文件（一行 @@@ 分隔「协议正文」与「尾部契约」）
