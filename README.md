@@ -16,7 +16,7 @@
 ![API](https://img.shields.io/badge/API-OpenAI_compatible-412991?logo=openai&logoColor=white)
 ![Auth](https://img.shields.io/badge/Auth-HMAC--SHA256-orange)
 ![Endpoint](https://img.shields.io/badge/127.0.0.1-8788%2Fv1-informational)
-![License](https://img.shields.io/badge/License-Research_Only-red)
+[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC_BY--NC--SA_4.0-red)](LICENSE)
 
 ![方案 A](https://img.shields.io/badge/方案_A-直连云网关-blue)
 ![方案 B](https://img.shields.io/badge/方案_B-App_本地_server-green)
