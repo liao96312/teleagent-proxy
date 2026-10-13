@@ -1,5 +1,12 @@
 # TeleAgent Proxy
 
+> [!CAUTION]
+> **免责声明｜Disclaimer**
+>
+> 本仓库**仅供学习交流与技术研究**，**严禁用于商业盈利或任何违法违规用途**。本项目与中国电信 / TeleAI / TeleAgent 等官方平台**无任何关联**。使用本项目可能违反服务条款，**账号被封、数据损失、法律责任等一切后果由使用者自行承担，与作者无关**。请遵守所在地法律及平台条款，下载后请于 24 小时内删除。**使用即视为同意**。→ [完整免责声明](DISCLAIMER.md)。
+>
+> For learning and research only. No commercial or illegal use. Not affiliated with any official platform. Use at your own risk — the author is not responsible for account bans, data loss or legal consequences. See [DISCLAIMER.md](DISCLAIMER.md).
+
 **语言：** 简体中文
 
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)
